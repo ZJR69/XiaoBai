@@ -194,9 +194,11 @@ def init_db() -> None:
         # 索引须在列就绪后建（旧库 executescript 时列尚未存在，放 DDL 会崩）
         conn.execute("CREATE INDEX IF NOT EXISTS idx_chat_messages_session ON chat_messages(session_id)")
         # 存量迁移：多会话改造前，按日期把旧对话归入每日期一个会话（幂等：二跑无 NULL 普通消息）
+        # 天级消息（☀ 早报 / 🌙 复盘 / ⏰ 通知）不归会话——它们属于某一天，不复制进每个会话
         old_dates = conn.execute(
             """SELECT DISTINCT session_date FROM chat_messages
-               WHERE session_id IS NULL AND role IN ('user','assistant') AND content NOT LIKE '☀%'"""
+               WHERE session_id IS NULL AND role IN ('user','assistant')
+                 AND content NOT LIKE '☀%' AND content NOT LIKE '🌙%' AND content NOT LIKE '⏰%'"""
         ).fetchall()
         for r in old_dates:
             day = r["session_date"]
@@ -212,7 +214,8 @@ def init_db() -> None:
             conn.execute(
                 """UPDATE chat_messages SET session_id=?
                    WHERE session_date=? AND session_id IS NULL
-                     AND role IN ('user','assistant') AND content NOT LIKE '☀%'""",
+                     AND role IN ('user','assistant')
+                     AND content NOT LIKE '☀%' AND content NOT LIKE '🌙%' AND content NOT LIKE '⏰%'""",
                 (cur.lastrowid, day),
             )
         conn.commit()
