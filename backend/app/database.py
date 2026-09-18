@@ -91,6 +91,22 @@ CREATE TABLE IF NOT EXISTS agent_suggestions (
 
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
 CREATE INDEX IF NOT EXISTS idx_inbox_status ON inbox_items(status);
+
+-- wiki 归档状态（Git 化：归档时记录哈希，之后对比判断 modified）
+CREATE TABLE IF NOT EXISTS wiki_pages (
+  path TEXT PRIMARY KEY,
+  archived_hash TEXT,
+  archived_at TEXT
+);
+
+-- 对话消息（对话流持久化，记忆同步的数据源）
+CREATE TABLE IF NOT EXISTS chat_messages (
+  id INTEGER PRIMARY KEY,
+  session_date TEXT,
+  role TEXT,
+  content TEXT NOT NULL,
+  created_at TEXT
+);
 """
 
 
