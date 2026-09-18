@@ -1,0 +1,96 @@
+/* 小白 · 极简风格（浅色，棕绿点缀） */
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg: #f7f5f0;
+  --card: #ffffff;
+  --text: #3a3630;
+  --muted: #9a948a;
+  --accent: #3a7d5c;
+  --accent-brown: #8a6d3b;
+  --border: #e5e0d5;
+}
+
+body {
+  font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 15px;
+}
+
+.app { max-width: 720px; margin: 0 auto; padding: 32px 20px 60px; }
+
+header { display: flex; align-items: baseline; gap: 12px; margin-bottom: 20px; }
+header h1 { font-size: 26px; font-weight: 600; color: var(--accent-brown); }
+header .sub { color: var(--muted); font-size: 13px; }
+
+/* 速记栏 */
+.capture-bar { display: flex; gap: 8px; margin-bottom: 24px; }
+.capture-bar input {
+  flex: 1; padding: 12px 14px; font-size: 15px;
+  border: 1px solid var(--border); border-radius: 8px; background: var(--card);
+  outline: none;
+}
+.capture-bar input:focus { border-color: var(--accent); }
+.capture-bar button {
+  padding: 0 20px; border: none; border-radius: 8px; cursor: pointer;
+  background: var(--accent); color: #fff; font-size: 15px;
+}
+
+/* 标签页 */
+.tabs { display: flex; gap: 4px; margin-bottom: 16px; }
+.tabs button {
+  padding: 8px 18px; border: none; background: transparent; cursor: pointer;
+  font-size: 15px; color: var(--muted); border-radius: 6px;
+}
+.tabs button.active { background: var(--card); color: var(--text); box-shadow: 0 1px 3px rgba(0,0,0,.06); }
+
+/* 收件箱 */
+.inbox-item {
+  background: var(--card); border: 1px solid var(--border); border-radius: 8px;
+  padding: 14px 16px; margin-bottom: 10px;
+}
+.inbox-content { font-size: 15px; white-space: pre-wrap; }
+.inbox-time { font-size: 12px; color: var(--muted); margin: 6px 0 10px; }
+.inbox-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.chip {
+  padding: 4px 12px; font-size: 13px; border-radius: 999px; cursor: pointer;
+  background: transparent; border: 1px solid var(--border);
+}
+.chip.discard { color: var(--muted); }
+
+/* 任务表单 */
+.task-form { display: flex; gap: 8px; margin-bottom: 16px; }
+.task-form input[type="text"], .task-form input:not([type]) {
+  flex: 1; padding: 9px 12px; border: 1px solid var(--border); border-radius: 6px; outline: none;
+}
+.task-form select, .task-form input[type="date"] {
+  padding: 9px; border: 1px solid var(--border); border-radius: 6px; background: var(--card);
+}
+.task-form button {
+  padding: 0 16px; border: none; border-radius: 6px; background: var(--accent);
+  color: #fff; cursor: pointer;
+}
+
+/* 任务列表 */
+.task-list { list-style: none; }
+.task {
+  display: flex; align-items: center; gap: 10px;
+  background: var(--card); border: 1px solid var(--border); border-radius: 8px;
+  padding: 10px 14px; margin-bottom: 8px;
+}
+.task-row { display: flex; align-items: center; gap: 10px; flex: 1; cursor: pointer; }
+.task-row input[type="checkbox"] { accent-color: var(--accent); width: 16px; height: 16px; cursor: pointer; }
+.task-title { flex: 1; }
+.task-pri { font-size: 12px; color: var(--accent-brown); }
+.task-due { font-size: 12px; color: var(--muted); }
+.task-del {
+  border: none; background: transparent; color: var(--muted); cursor: pointer;
+  font-size: 16px; padding: 0 4px;
+}
+
+/* 完成态：保留可见，划线 + 浅底（用户既有习惯） */
+.task.done { background: #f0ede6; border-color: var(--border); }
+.task.done .task-title { text-decoration: line-through; color: var(--muted); }
+
+.empty { color: var(--muted); text-align: center; padding: 40px 0; font-size: 14px; }
