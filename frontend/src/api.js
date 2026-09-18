@@ -91,6 +91,22 @@ export const api = {
   briefingShouldShow: () => request('/api/briefing/should-show'),
   markBriefingShown: () => request('/api/briefing/mark-shown', { method: 'POST' }),
 
+  // 晚间复盘（M4 FR-4.4）
+  feedbackShouldStart: () => request('/api/feedback/should-start'),
+  feedbackStart: () => request('/api/feedback/start', { method: 'POST' }),
+  feedbackExtract: (messages) =>
+    request('/api/feedback/extract', { method: 'POST', body: JSON.stringify({ messages }) }),
+
+  // 统一搜索（FR-2.5）
+  search: (q) => request(`/api/search?q=${encodeURIComponent(q)}`),
+
+  // wiki 编辑 + 体检（FR-2.4 / M5）
+  saveWikiPage: (path, content) =>
+    request('/api/wiki/page', { method: 'PUT', body: JSON.stringify({ path, content }) }),
+  wikiLint: () => request('/api/wiki/lint'),
+  fixIndex: (paths) =>
+    request('/api/wiki/fix-index', { method: 'POST', body: JSON.stringify({ paths }) }),
+
   // 状态栏
   statusBar: async () => {
     const [tasks, inbox, reminders] = await Promise.all([

@@ -53,6 +53,51 @@ export default function ChatView({ refresh, initialMessage, onSeedConsumed, noti
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [notice])
 
+  // 晚间复盘（M4 FR-4.4）：20 点后当天首次 → 小白发开场；in_progress 时显示「结束复盘」
+  const [feedbackMode, setFeedbackMode] = useState(false)
+  useEffect(() => {
+    if (initialMessage) return
+    ;(async () => {
+      try {
+        const { status } = await api.feedbackShouldStart()
+        if (status === 'pending') {
+          const res = await api.feedbackStart()
+          if (res.ok) {
+            setMessages((m) => [...m, { role: 'assistant', content: `🌙 ${res.opening}`, feedback: true }])
+            setFeedbackMode(true)
+          }
+        } else if (status === 'in_progress') {
+          setFeedbackMode(true)
+        }
+      } catch (err) {
+        console.error('feedback check failed:', err)
+      }
+    })()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // 结束复盘：提取信号（完成的事/负荷/修正意见）→ 阈值自校准
+  const endFeedback = async () => {
+    if (busy) return
+    try {
+      const res = await api.feedbackExtract(messages.slice(-20))
+      const s = res.signals || {}
+      const doneList = (s.completed || []).length ? `\n今天实际完成：${s.completed.join('、')}` : ''
+      const loadText = { easy: '负荷轻松', ok: '负荷刚好', overloaded: '负荷过载' }[s.load] || '负荷正常'
+      const adj = res.threshold_changed
+        ? `\n（并行度阈值已调整：${res.threshold_changed} 件，后续简报按新阈值预警）`
+        : ''
+      setMessages((m) => [...m, {
+        role: 'assistant',
+        content: `复盘记录已存。${loadText}。${doneList}${adj}\n明天简报见。`,
+        feedback: true,
+      }])
+      setFeedbackMode(false)
+    } catch (err) {
+      setMessages((m) => [...m, { role: 'assistant', content: `（复盘提取失败：${err.message}）` }])
+    }
+  }
+
   const sendText = async (raw) => {
     const text = raw.trim()
     if (!text || busy) return
@@ -142,8 +187,8 @@ export default function ChatView({ refresh, initialMessage, onSeedConsumed, noti
           </div>
         )}
         {messages.map((m, i) => (
-          <div key={i} className={m.role === 'user' ? 'bubble user' : m.briefing ? 'bubble assistant briefing' : m.notice ? 'bubble assistant notice' : 'bubble assistant'}>
-            <div className="bubble-name">{m.briefing ? '小白 · 早报' : m.notice ? '小白 · 提醒' : m.role === 'user' ? '我' : '小白'}</div>
+          <div key={i} className={m.role === 'user' ? 'bubble user' : m.briefing ? 'bubble assistant briefing' : m.notice ? 'bubble assistant notice' : m.feedback ? 'bubble assistant feedback' : 'bubble assistant'}>
+            <div className="bubble-name">{m.briefing ? '小白 · 早报' : m.notice ? '小白 · 提醒' : m.feedback ? '小白 · 晚间复盘' : m.role === 'user' ? '我' : '小白'}</div>
             <div className="bubble-content">{m.content}</div>
           </div>
         ))}
@@ -194,6 +239,11 @@ export default function ChatView({ refresh, initialMessage, onSeedConsumed, noti
           placeholder="和小白说话…"
           disabled={busy}
         />
+        {feedbackMode && (
+          <button type="button" className="review-btn feedback" onClick={endFeedback} disabled={busy} title="结束今晚的复盘，小白提取信号校准后续安排">
+            结束复盘
+          </button>
+        )}
         <button type="button" className="review-btn" onClick={review} disabled={reviewing || messages.length === 0} title="回顾本段对话，提取共识生成入库提案">
           {reviewing ? '回顾中…' : '回顾对话'}
         </button>

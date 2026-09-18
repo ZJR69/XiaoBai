@@ -171,9 +171,23 @@ def digest(body: DigestIn):
         _append_log(f"## [{today}] ingest | {p.name}")
 
         _register(rel, p, h, page_rel, now)
+        _register_review(page_rel, p.stem)  # 间隔重现登记（M5 FR-5.1）
         results.append({"path": rel, "ok": True, "source_page": page_rel})
 
     return {"results": results}
+
+
+def _register_review(page: str, title: str):
+    """消化成功 → 间隔重现登记（1 天后首次重现）"""
+    from datetime import date, timedelta
+
+    with get_conn() as conn:
+        conn.execute(
+            """INSERT INTO spaced_reviews (page, title, introduced_at, next_review_at, interval_days)
+               VALUES (?, ?, ?, ?, 1)""",
+            (page, title, datetime.now().isoformat(timespec="seconds"),
+             (date.today() + timedelta(days=1)).isoformat()),
+        )
 
 
 def _register(rel: str, p: Path, h: str, page: str | None, now: str):

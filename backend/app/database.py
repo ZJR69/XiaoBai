@@ -139,6 +139,24 @@ CREATE TABLE IF NOT EXISTS briefings (
   created_at TEXT,
   shown_at TEXT
 );
+
+-- 键值设置（M4 FR-4.5：并行度阈值等，随反馈对话自校准）
+CREATE TABLE IF NOT EXISTS settings (
+  key TEXT PRIMARY KEY,
+  value TEXT
+);
+
+-- 间隔重现队列（M5 FR-5.1：入库知识按 1/3/7/14/30 天间隔在简报中重现）
+CREATE TABLE IF NOT EXISTS spaced_reviews (
+  id INTEGER PRIMARY KEY,
+  page TEXT NOT NULL,                 -- wiki 页相对路径
+  title TEXT NOT NULL,
+  introduced_at TEXT,
+  next_review_at TEXT,                -- 到期日（含当天）
+  interval_days INTEGER DEFAULT 1,
+  review_count INTEGER DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_reviews_due ON spaced_reviews(next_review_at);
 """
 
 

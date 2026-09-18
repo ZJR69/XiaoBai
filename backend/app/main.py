@@ -6,7 +6,8 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.database import init_db
 from app.routers import (
-    briefing, capture, chat, inbox, projects, raw, reminders, schedule, scheduler, tasks, watch, wiki,
+    briefing, capture, chat, feedback, inbox, projects, raw, reminders,
+    schedule, scheduler, search, tasks, watch, wiki,
 )
 
 
@@ -38,6 +39,8 @@ app.include_router(watch.router)
 app.include_router(schedule.router)
 app.include_router(scheduler.router)
 app.include_router(briefing.router)
+app.include_router(feedback.router)
+app.include_router(search.router)
 
 
 @app.get("/api/health")

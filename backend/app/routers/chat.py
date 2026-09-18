@@ -299,6 +299,19 @@ def _write_core_section(title: str, detail: str) -> tuple[bool, str]:
     return True, note
 
 
+def _register_review(page: str, title: str):
+    """入库知识登记间隔重现（M5 FR-5.1：1 天后首次重现）"""
+    from datetime import date, timedelta
+
+    with get_conn() as conn:
+        conn.execute(
+            """INSERT INTO spaced_reviews (page, title, introduced_at, next_review_at, interval_days)
+               VALUES (?, ?, ?, ?, 1)""",
+            (page, title, datetime.now().isoformat(timespec="seconds"),
+             (date.today() + timedelta(days=1)).isoformat()),
+        )
+
+
 def _write_entity_page(title: str, detail: str, today: str) -> tuple[bool, str]:
     """写 entities/ 实体页：已存在则追加更新记录，不存在则新建。"""
     slug = re.sub(r'[\\/:*?"<>|\s]+', "-", title)[:60]
@@ -369,6 +382,7 @@ def apply_proposals(body: ProposalDecision):
                 _update_index(page_rel, title)
                 _append_log(f"## [{today}] ingest | 对话沉淀：{title}")
                 result = {"kind": "knowledge", "title": title, "page": page_rel, "ok": True}
+                _register_review(page_rel, title)  # 间隔重现登记
             elif p.get("kind") == "core":
                 title = (p.get("title") or "杂项").strip()
                 ok, note = _write_core_section(title, p.get("detail", ""))

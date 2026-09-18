@@ -154,10 +154,68 @@ function NotifyBell({ onImportant }) {
           {openItems.map((n) => (
             <div key={n.id} className="notify-item">
               <div className="notify-title">
-                <span className={`kind-chip ${n.kind}`}>{n.kind === 'due' ? '截止' : n.kind === 'schedule' ? '日程' : '提醒'}</span>
+                <span className={`kind-chip ${n.kind}`}>
+                  {n.kind === 'due' ? '截止' : n.kind === 'schedule' ? '日程' : n.kind === 'graveyard' ? '待清理' : '提醒'}
+                </span>
                 {n.title}
               </div>
               {n.detail && <div className="notify-detail">{n.detail}</div>}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// 统一搜索（FR-2.5）：侧栏输入 → 全库搜（wiki/任务/事务）
+function SearchBox() {
+  const [q, setQ] = useState('')
+  const [result, setResult] = useState(null)
+
+  const doSearch = async (e) => {
+    e.preventDefault()
+    const query = q.trim()
+    if (query.length < 2) return
+    setResult(await api.search(query).catch(() => null))
+  }
+
+  return (
+    <div className="search-wrap">
+      <form onSubmit={doSearch}>
+        <input
+          className="search-input"
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+          placeholder="搜索任务/知识/事务…"
+        />
+      </form>
+      {result && (
+        <div className="search-panel">
+          <div className="notify-head">
+            搜索「{result.q}」
+            <button className="icon-btn" onClick={() => setResult(null)}>×</button>
+          </div>
+          {result.wiki.length === 0 && result.tasks.length === 0 && result.projects.length === 0 && (
+            <p className="empty">没有匹配结果。</p>
+          )}
+          {result.wiki.length > 0 && <div className="search-group">知识库</div>}
+          {result.wiki.map((w) => (
+            <div key={w.path} className="notify-item">
+              <div className="notify-title">{w.title}</div>
+              {w.snippet && <div className="notify-detail">{w.snippet}</div>}
+            </div>
+          ))}
+          {result.projects.length > 0 && <div className="search-group">进行中的事</div>}
+          {result.projects.map((p) => (
+            <div key={p.id} className="notify-item">
+              <div className="notify-title">{p.name} <span className="hint">（{p.category}）</span></div>
+            </div>
+          ))}
+          {result.tasks.length > 0 && <div className="search-group">任务</div>}
+          {result.tasks.map((t) => (
+            <div key={t.id} className="notify-item">
+              <div className="notify-title">{t.title} <span className="hint">（{t.status}{t.due_at ? `，截止 ${t.due_at.slice(5, 10)}` : ''}）</span></div>
             </div>
           ))}
         </div>
@@ -206,6 +264,7 @@ export default function App() {
           ))}
         </nav>
         <div className="sidebar-status">
+          <SearchBox />
           <WatchTip onGoRaw={() => setView('knowledge')} />
           <div>待办 {status.openTasks}</div>
           <div>闪记 {status.inbox}</div>

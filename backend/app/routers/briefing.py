@@ -7,16 +7,57 @@
 from datetime import datetime, timedelta
 
 from fastapi import APIRouter
-from fastapi.responses import JSONResponse
 
 from app import llm
 from app.database import get_conn
 
 router = APIRouter(prefix="/api/briefing", tags=["briefing"])
 
+from pathlib import Path
+
+# backend/app/routers/briefing.py → storage/wiki
+WIKI_DIR = Path(__file__).resolve().parents[3] / "storage" / "wiki"
+
 
 def _today() -> str:
     return datetime.now().date().isoformat()
+
+
+def _due_reviews(today: str) -> list[str]:
+    """到期间隔重现条目（M5 FR-5.1）：挑 2 条附摘要"""
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT id, page, title FROM spaced_reviews WHERE next_review_at <= ? ORDER BY next_review_at LIMIT 2",
+            (today,),
+        ).fetchall()
+    lines = []
+    for r in rows:
+        page = WIKI_DIR / r["page"]
+        summary = ""
+        if page.is_file():
+            for ln in page.read_text(encoding="utf-8").splitlines():
+                s = ln.strip()
+                if s and not s.startswith(("#", "-", "---", ">")) and ":" not in s[:12]:
+                    summary = s[:100]
+                    break
+        lines.append(f"- {r['title']}：{summary}" if summary else f"- {r['title']}（{r['page']}）")
+    return lines
+
+
+def _advance_reviews(today: str):
+    """简报生成后推进到期条目的下一次重现时间"""
+    from datetime import timedelta
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT id, interval_days FROM spaced_reviews WHERE next_review_at <= ? LIMIT 2",
+            (today,),
+        ).fetchall()
+        for r in rows:
+            new_interval = min(30, max(3, r["interval_days"] * 2))
+            conn.execute(
+                "UPDATE spaced_reviews SET interval_days = ?, next_review_at = ?, review_count = review_count + 1 WHERE id = ?",
+                (new_interval, (datetime.now().date() + timedelta(days=new_interval)).isoformat(), r["id"]),
+            )
 
 
 def _build_briefing_data() -> str:
@@ -62,6 +103,15 @@ def _build_briefing_data() -> str:
             f"- {r['name']}：{r['content'][:50]}（{r['created_at'][:10]}）" for r in logs
         ))
 
+    # 间隔重现（M5 FR-5.1）
+    reviews = _due_reviews(_today())
+    if reviews:
+        parts.append("知识重现（之前入库的知识，今天到期复习）：\n" + "\n".join(reviews))
+
+    # 并行度阈值（FR-4.5 自校准值）
+    from app.routers.feedback import get_parallel_threshold
+    parts.append(f"（内部参数：并行度预警阈值当前为 {get_parallel_threshold()} 件）")
+
     return "\n\n".join(parts)
 
 
@@ -72,8 +122,9 @@ BRIEFING_PROMPT = """你是小白，用户的个人管理智能体。基于以�
 - 「今日三件事」：从任务和事务里挑出今天最值得推进的 3 件，说明为什么是它们
 - 「杂务提醒」：生活提醒类，没有就不写这节
 - 「本周回顾」：本周事务动态的一句话总结，没有就略过
-- 「并行度预警」：未完成任务 + 进行中的事总数超过 8 件时，提醒该收束（砍/延/委派），没超就不写
-- 语气克制直接，全文不超过 250 字，markdown 列表
+- 「知识重现」：数据里有「知识重现」节时，用一两句自然的话带出这些旧知识（别啰嗦），没有就略过
+- 「并行度预警」：未完成任务 + 进行中的事总数超过数据末尾给的阈值时，具体建议砍/延/委派哪几件，没超就不写
+- 语气克制直接，全文不超过 280 字，markdown 列表
 - 只引用数据里真实存在的条目，不要编造"""
 
 
@@ -81,11 +132,13 @@ def _generate() -> str:
     data = _build_briefing_data()
     if llm.llm_available():
         try:
-            return llm.chat_completion(
+            content = llm.chat_completion(
                 [{"role": "system", "content": BRIEFING_PROMPT},
                  {"role": "user", "content": data}],
                 temperature=0.4,
             )
+            _advance_reviews(_today())  # 展示过的条目推进间隔
+            return content
         except Exception as e:
             # LLM 失败降级：模板版简报（保证每天早上有东西看）
             return _template(data, f"（LLM 暂不可用：{e}）")
