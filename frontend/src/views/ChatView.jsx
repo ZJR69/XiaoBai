@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { api } from '../api.js'
 
-export default function ChatView({ refresh, initialMessage, onSeedConsumed }) {
+export default function ChatView({ refresh, initialMessage, onSeedConsumed, notice, onNoticeConsumed }) {
   const [messages, setMessages] = useState([]) // {role, content}
   const [input, setInput] = useState('')
   const [busy, setBusy] = useState(false)
@@ -24,6 +24,34 @@ export default function ChatView({ refresh, initialMessage, onSeedConsumed }) {
       .catch(console.error)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  // 早间简报：当天首次打开，小白在对话流里主动发一条（M4 FR-4.2）
+  const briefingChecked = useRef(false)
+  useEffect(() => {
+    if (initialMessage || briefingChecked.current) return
+    briefingChecked.current = true
+    ;(async () => {
+      try {
+        const { show } = await api.briefingShouldShow()
+        if (!show) return
+        const b = await api.getBriefing()
+        setMessages((m) => [...m, { role: 'assistant', content: b.content, briefing: true }])
+        await api.markBriefingShown()
+      } catch (err) {
+        console.error('briefing failed:', err)
+      }
+    })()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // 重要通知（截止临近）：App 轮询到新的就插进当前对话（后端已同步写库，这里只做即时展示）
+  useEffect(() => {
+    if (notice && notice.id) {
+      setMessages((m) => [...m, { role: 'assistant', content: `⏰ ${notice.title}\n${notice.detail}`, notice: true }])
+      onNoticeConsumed?.(notice.id)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [notice])
 
   const sendText = async (raw) => {
     const text = raw.trim()
@@ -114,8 +142,8 @@ export default function ChatView({ refresh, initialMessage, onSeedConsumed }) {
           </div>
         )}
         {messages.map((m, i) => (
-          <div key={i} className={m.role === 'user' ? 'bubble user' : 'bubble assistant'}>
-            <div className="bubble-name">{m.role === 'user' ? '我' : '小白'}</div>
+          <div key={i} className={m.role === 'user' ? 'bubble user' : m.briefing ? 'bubble assistant briefing' : m.notice ? 'bubble assistant notice' : 'bubble assistant'}>
+            <div className="bubble-name">{m.briefing ? '小白 · 早报' : m.notice ? '小白 · 提醒' : m.role === 'user' ? '我' : '小白'}</div>
             <div className="bubble-content">{m.content}</div>
           </div>
         ))}

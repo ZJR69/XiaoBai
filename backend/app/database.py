@@ -119,6 +119,26 @@ CREATE TABLE IF NOT EXISTS raw_files (
   first_seen_at TEXT,
   digested_at TEXT
 );
+
+-- 调度器通知（M4/M6：提醒触发、截止临近、日程预告、简报就绪）
+CREATE TABLE IF NOT EXISTS notifications (
+  id INTEGER PRIMARY KEY,
+  kind TEXT,                         -- reminder/due/schedule
+  title TEXT NOT NULL,
+  detail TEXT,
+  important INTEGER DEFAULT 0,       -- 重要通知同步写入对话流
+  created_at TEXT,
+  dismissed_at TEXT                  -- 非空 = 已处理
+);
+CREATE INDEX IF NOT EXISTS idx_notifications_open ON notifications(dismissed_at);
+
+-- 早间简报（M4 FR-4.2：当天生成一次缓存；shown_at 非空 = 已在对话流展示过）
+CREATE TABLE IF NOT EXISTS briefings (
+  date TEXT PRIMARY KEY,
+  content TEXT NOT NULL,
+  created_at TEXT,
+  shown_at TEXT
+);
 """
 
 

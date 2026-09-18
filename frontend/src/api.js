@@ -72,6 +72,25 @@ export const api = {
   applyProposals: (proposals) =>
     request('/api/proposals/apply', { method: 'POST', body: JSON.stringify({ proposals }) }),
 
+  // 日程表（M4）
+  listSchedule: () => request('/api/schedule'),
+  todaySchedule: () => request('/api/schedule/today'),
+  createSlot: (s) =>
+    request('/api/schedule', { method: 'POST', body: JSON.stringify(s) }),
+  updateSlot: (id, patch) =>
+    request(`/api/schedule/${id}`, { method: 'PATCH', body: JSON.stringify(patch) }),
+  deleteSlot: (id) => request(`/api/schedule/${id}`, { method: 'DELETE' }),
+
+  // 通知（M4/M6 调度器）
+  listNotifications: () => request('/api/notifications'),
+  dismissNotifications: (ids) =>
+    request('/api/notifications/dismiss', { method: 'POST', body: JSON.stringify({ ids }) }),
+
+  // 早间简报（M4）
+  getBriefing: () => request('/api/briefing'),
+  briefingShouldShow: () => request('/api/briefing/should-show'),
+  markBriefingShown: () => request('/api/briefing/mark-shown', { method: 'POST' }),
+
   // 状态栏
   statusBar: async () => {
     const [tasks, inbox, reminders] = await Promise.all([
