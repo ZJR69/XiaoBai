@@ -13,6 +13,18 @@ export default function ChatView({ refresh, initialMessage, onSeedConsumed }) {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages, proposals])
 
+  // 刷新后恢复今日对话（chat_messages 不做只写不读的假持久化）
+  // 例外：从闪记带种子消息进来时不加载，避免覆盖正在进行的处理流
+  useEffect(() => {
+    if (initialMessage) return
+    api.chatHistory()
+      .then((res) => {
+        if (res.messages.length > 0) setMessages(res.messages)
+      })
+      .catch(console.error)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
   const sendText = async (raw) => {
     const text = raw.trim()
     if (!text || busy) return
@@ -74,12 +86,19 @@ export default function ChatView({ refresh, initialMessage, onSeedConsumed }) {
       return
     }
     const res = await api.applyProposals(approved)
+    // 如实汇报：成功与失败分开说，不谎报全入库
+    const ok = res.applied.filter((a) => a.ok !== false)
+    const failed = res.applied.filter((a) => a.ok === false)
+    const parts = []
+    if (ok.length) {
+      parts.push(`已入库 ${ok.length} 条：\n` + ok.map((a) => `· ${a.title}${a.note ? `（${a.note}）` : ''}`).join('\n'))
+    }
+    if (failed.length) {
+      parts.push(`未执行 ${failed.length} 条（请手动处理）：\n` + failed.map((a) => `· ${a.title}（${a.error}）`).join('\n'))
+    }
     setMessages((m) => [
       ...m,
-      {
-        role: 'assistant',
-        content: `已入库 ${res.applied.length} 条：\n` + res.applied.map((a) => `· ${a.title}`).join('\n'),
-      },
+      { role: 'assistant', content: parts.join('\n\n') || '没有可执行的提案。' },
     ])
     setProposals(null)
     refresh?.()

@@ -5,7 +5,9 @@
 - 对话中实体锚定（防幻觉）：回复中项目名等关联真实库条目
 - 「回顾对话」→ 批量提案，所有入库经用户裁决（防污染铁律）
 """
+import re
 from datetime import datetime
+from pathlib import Path
 
 from fastapi import APIRouter
 from pydantic import BaseModel
@@ -14,6 +16,9 @@ from app import llm
 from app.database import get_conn
 
 router = APIRouter(prefix="/api", tags=["chat"])
+
+# backend/app/routers/chat.py → storage/wiki
+WIKI_DIR = Path(__file__).resolve().parents[3] / "storage" / "wiki"
 
 
 def _build_context() -> str:
@@ -30,6 +35,9 @@ def _build_context() -> str:
         inbox = conn.execute(
             "SELECT COUNT(*) AS n FROM inbox_items WHERE status = 'pending'"
         ).fetchone()
+        reminders = conn.execute(
+            "SELECT title FROM reminders WHERE active = 1 ORDER BY id"
+        ).fetchall()
 
     lines = ["【用户的当前状态（小白的后台记忆，真实数据）】"]
     if projects:
@@ -40,8 +48,21 @@ def _build_context() -> str:
             due = f"，截止 {t['due_at'][:10]}" if t["due_at"] else ""
             proj = f"（{t['project']}）" if t["project"] else ""
             lines.append(f"- {t['title']}{proj} [{t['status']}]{due}")
+    if reminders:
+        lines.append("生活提醒：" + "、".join(r["title"] for r in reminders))
     if inbox["n"]:
         lines.append(f"闪记池有 {inbox['n']} 条待处理")
+
+    # 知识库目录（Karpathy Query 模式：问答先走 index）
+    wiki_index = WIKI_DIR / "index.md"
+    if wiki_index.exists():
+        entries = [
+            l for l in wiki_index.read_text(encoding="utf-8").splitlines()
+            if l.startswith("- ") and "（暂无）" not in l
+        ]
+        if entries:
+            lines.append("知识库目录（用户已消化的知识，涉及相关知识时优先引用这些条目）：")
+            lines += entries[:50]
     return "\n".join(lines)
 
 
@@ -97,6 +118,18 @@ def chat(body: ChatIn):
     return {"reply": reply}
 
 
+@router.get("/chat/history")
+def chat_history(date: str | None = None):
+    """拉取某天的对话记录（默认今天）。前端刷新后恢复对话流，不做只写不读的假持久化。"""
+    day = date or datetime.now().isoformat()[:10]
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT role, content, created_at FROM chat_messages WHERE session_date = ? ORDER BY id",
+            (day,),
+        ).fetchall()
+    return {"date": day, "messages": [dict(r) for r in rows]}
+
+
 class ReviewIn(BaseModel):
     messages: list[dict]  # 本次要回顾的对话（含 role/content）
 
@@ -112,6 +145,7 @@ def review(body: ReviewIn):
     )
     prompt = f"""回顾以下对话，提取值得入库的共识。返回 JSON 数组，每项：
 {{"kind": "task|knowledge|update", "title": "简短标题", "detail": "具体内容",
+  "target": "仅 update 需要：要更新的任务或项目的准确名称（从对话或当前状态中找）",
   "evidence": "来源对话摘录", "action": "新增任务|新增知识条目|更新现有条目"}}
 只提取真实形成共识的内容，宁缺毋滥。没有就返回 []。
 
@@ -135,30 +169,42 @@ class ProposalDecision(BaseModel):
 
 @router.post("/proposals/apply")
 def apply_proposals(body: ProposalDecision):
-    """裁决通过的提案执行入库。task 建任务；knowledge 写入 wiki（sources 下对话沉淀页）。"""
-    import re
-    from pathlib import Path
-
+    """裁决通过的提案执行入库。task 建任务；knowledge 写入 wiki（sources 下对话沉淀页）；
+    update 挂靠目标条目的进展日志（PRD FR-3.1：对话中的信息可挂靠）。
+    留痕如实：执行失败的提案记 user_action='failed'，不谎报 accepted。"""
     from app.routers.raw import _append_log, _update_index
 
     applied = []
     now = datetime.now().isoformat(timespec="seconds")
     today = now[:10]
-    wiki_dir = Path(__file__).resolve().parents[3] / "storage" / "wiki"
+
+    def _find(conn, table: str, name: str):
+        """按名称精确 → 模糊匹配任务/项目（tasks 列为 title，projects 列为 name）"""
+        col = "title" if table == "tasks" else "name"
+        exact = conn.execute(
+            f"SELECT id, {col} AS name FROM {table} WHERE {col} = ? LIMIT 1", (name,)
+        ).fetchone()
+        if exact:
+            return exact
+        return conn.execute(
+            f"SELECT id, {col} AS name FROM {table} WHERE {col} LIKE ? ORDER BY id LIMIT 1",
+            (f"%{name}%",),
+        ).fetchone()
 
     with get_conn() as conn:
         for p in body.proposals:
+            result = None
             if p.get("kind") == "task":
                 conn.execute(
                     "INSERT INTO tasks (title, status, created_at) VALUES (?, 'backlog', ?)",
                     (p.get("title") or p.get("detail", "")[:100], now),
                 )
-                applied.append({"kind": "task", "title": p.get("title")})
+                result = {"kind": "task", "title": p.get("title"), "ok": True}
             elif p.get("kind") == "knowledge":
                 title = (p.get("title") or "未命名知识条目").strip()
                 slug = re.sub(r'[\\/:*?"<>|\s]+', "-", title)[:60]
                 page_rel = f"sources/{slug}.md"
-                page = wiki_dir / page_rel
+                page = WIKI_DIR / page_rel
                 front = (
                     f"---\ntype: source\ncreated: {today}\nupdated: {today}\n"
                     f"source: conversation\n---\n\n"
@@ -170,9 +216,36 @@ def apply_proposals(body: ProposalDecision):
                 page.write_text(front + body_text, encoding="utf-8")
                 _update_index(page_rel, title)
                 _append_log(f"## [{today}] ingest | 对话沉淀：{title}")
-                applied.append({"kind": "knowledge", "title": title, "page": page_rel})
+                result = {"kind": "knowledge", "title": title, "page": page_rel, "ok": True}
+            elif p.get("kind") == "update":
+                target = (p.get("target") or p.get("title") or "").strip()
+                detail = p.get("detail", "")
+                row = _find(conn, "tasks", target) if target else None
+                if row:
+                    conn.execute(
+                        "INSERT INTO progress_logs (task_id, kind, source, content, created_at) VALUES (?, 'note', 'agent', ?, ?)",
+                        (row["id"], detail, now),
+                    )
+                    result = {"kind": "update", "title": row["name"], "ok": True, "note": "已挂靠任务进展日志"}
+                else:
+                    proj = _find(conn, "projects", target) if target else None
+                    if proj:
+                        conn.execute(
+                            "INSERT INTO progress_logs (project_id, kind, source, content, created_at) VALUES (?, 'note', 'agent', ?, ?)",
+                            (proj["id"], detail, now),
+                        )
+                        result = {"kind": "update", "title": proj["name"], "ok": True, "note": "已挂靠项目进展日志"}
+                    else:
+                        result = {
+                            "kind": "update", "title": target or "(无目标)",
+                            "ok": False, "error": "未找到目标任务/项目，未执行",
+                        }
+            else:
+                result = {"kind": p.get("kind"), "title": p.get("title"), "ok": False, "error": "未知提案类型"}
+
+            applied.append(result)
             conn.execute(
-                "INSERT INTO agent_suggestions (date, kind, content, user_action, created_at) VALUES (?, ?, ?, 'accepted', ?)",
-                (today, "memory_sync", str(p), now),
+                "INSERT INTO agent_suggestions (date, kind, content, user_action, created_at) VALUES (?, ?, ?, ?, ?)",
+                (today, "memory_sync", str(p), "accepted" if result.get("ok") else "failed", now),
             )
     return {"applied": applied}
