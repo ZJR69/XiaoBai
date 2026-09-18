@@ -62,6 +62,40 @@ export const api = {
     request('/api/chat', { method: 'POST', body: JSON.stringify({ message, history }) }),
   chatHistory: (date) =>
     request(`/api/chat/history${date ? `?date=${date}` : ''}`),
+  chatDates: () => request('/api/chat/dates'),
+  // 流式对话（SSE）：onDelta 收增量，返回结束事件 {done, reply, actions}
+  chatStream: async (message, history, onDelta) => {
+    const res = await fetch('/api/chat/stream', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message, history }),
+    })
+    if (!res.ok) {
+      const detail = await res.json().catch(() => ({}))
+      throw new Error(detail.detail || `请求失败 ${res.status}`)
+    }
+    const reader = res.body.getReader()
+    const decoder = new TextDecoder()
+    let buf = ''
+    let final = null
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buf += decoder.decode(value, { stream: true })
+      let idx
+      while ((idx = buf.indexOf('\n\n')) >= 0) {
+        const raw = buf.slice(0, idx)
+        buf = buf.slice(idx + 2)
+        if (!raw.startsWith('data: ')) continue
+        try {
+          const ev = JSON.parse(raw.slice(6))
+          if (ev.done) final = ev
+          else if (ev.delta) onDelta?.(ev.delta)
+        } catch { /* 半截 JSON 由下轮补齐 */ }
+      }
+    }
+    return final
+  },
   reviewConversation: (messages) =>
     request('/api/review', { method: 'POST', body: JSON.stringify({ messages }) }),
   applyProposals: (proposals, rejected = []) =>

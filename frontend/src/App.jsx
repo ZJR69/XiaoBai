@@ -16,55 +16,6 @@ const NAV = [
   { key: 'life', label: '生活角' },
 ]
 
-// 闪记快捷弹窗：Ctrl+Shift+X 唤起，5 秒哑捕获（窗口级快捷键，M7 升系统级）
-function FlashPopup({ onCaptured }) {
-  const [open, setOpen] = useState(false)
-  const [text, setText] = useState('')
-
-  useEffect(() => {
-    const onKey = (e) => {
-      if (e.ctrlKey && e.shiftKey && e.key.toLowerCase() === 'x') {
-        e.preventDefault()
-        setOpen((o) => !o)
-      }
-      if (e.key === 'Escape') setOpen(false)
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [])
-
-  const submit = async () => {
-    const t = text.trim()
-    if (!t) return
-    try {
-      await api.capture(t)
-    } catch (err) {
-      alert(err.message)
-      return
-    }
-    setText('')
-    setOpen(false)
-    onCaptured?.()
-  }
-
-  if (!open) return null
-  return (
-    <div className="popup-mask" onClick={() => setOpen(false)}>
-      <div className="popup" onClick={(e) => e.stopPropagation()}>
-        <input
-          autoFocus
-          value={text}
-          onChange={(e) => setText(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter') submit()
-          }}
-          placeholder="闪记：想到什么记什么，不用分类…（Enter 保存，Esc 关闭）"
-        />
-      </div>
-    </div>
-  )
-}
-
 // dropzone 变更监听提示：轮询后端事件（watchdog 检测到新文件时显示）
 function WatchTip({ onGoRaw }) {
   const [since, setSince] = useState(null)
@@ -110,6 +61,17 @@ function NotifyBell({ onImportant }) {
   const [items, setItems] = useState([])
   const [open, setOpen] = useState(false)
   const seen = useRef(new Set())
+  const wrapRef = useRef(null)
+
+  // 点面板外任意处收回（再点铃铛切换开关）
+  useEffect(() => {
+    if (!open) return
+    const onDoc = (e) => {
+      if (wrapRef.current && !wrapRef.current.contains(e.target)) setOpen(false)
+    }
+    document.addEventListener('mousedown', onDoc)
+    return () => document.removeEventListener('mousedown', onDoc)
+  }, [open])
 
   useEffect(() => {
     let timer
@@ -141,7 +103,7 @@ function NotifyBell({ onImportant }) {
   }
 
   return (
-    <div className="notify-wrap">
+    <div className="notify-wrap" ref={wrapRef}>
       <button className="notify-bell" onClick={() => setOpen((o) => !o)} title="通知">
         🔔
         {openItems.length > 0 && <span className="nav-badge">{openItems.length}</span>}
@@ -296,8 +258,6 @@ export default function App() {
         {view === 'knowledge' && <KnowledgeView refreshKey={refreshKey} initialTab={knowledgeTab} />}
         {view === 'life' && <LifeView refreshKey={refreshKey} refresh={refresh} />}
       </main>
-
-      <FlashPopup onCaptured={refresh} />
     </div>
   )
 }
