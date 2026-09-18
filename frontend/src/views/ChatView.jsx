@@ -1,16 +1,23 @@
 import { useEffect, useRef, useState } from 'react'
 import { api } from '../api.js'
 
-export default function ChatView({ refresh, initialMessage, onSeedConsumed, notice, onNoticeConsumed }) {
-  const [messages, setMessages] = useState([]) // {role, content}
+export default function ChatView({ refresh, initialMessage, onSeedConsumed, notice, onNoticeConsumed, goView }) {
+  const [messages, setMessages] = useState([]) // {role, content, actions?}
   const [input, setInput] = useState('')
   const [busy, setBusy] = useState(false)
   const [proposals, setProposals] = useState(null) // 回顾生成的提案清单
   const [reviewing, setReviewing] = useState(false)
   const [feedbackMode, setFeedbackMode] = useState(false)
   const [extracting, setExtracting] = useState(false) // 结束复盘防连点
+  const [anchors, setAnchors] = useState([]) // 实体锚点名单（真实库条目，IDS 2.1）
+  const [editIdx, setEditIdx] = useState(null) // 修改中的提案序号
+  const [editDraft, setEditDraft] = useState({ title: '', detail: '' })
   const bottomRef = useRef(null)
   const historyLoaded = useRef(false)
+
+  const loadAnchors = () =>
+    api.listAnchors().then((r) => setAnchors(r.anchors || [])).catch(() => {})
+  useEffect(() => { loadAnchors() }, [])
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -164,13 +171,84 @@ export default function ChatView({ refresh, initialMessage, onSeedConsumed, noti
     setMessages((m) => [...m, { role: 'user', content: text }])
     setBusy(true)
     try {
-      const { reply } = await api.chat(text, history)
-      setMessages((m) => [...m, { role: 'assistant', content: reply }])
+      const { reply, actions } = await api.chat(text, history)
+      setMessages((m) => [...m, { role: 'assistant', content: reply, actions: actions || [] }])
     } catch (err) {
       setMessages((m) => [...m, { role: 'assistant', content: `（出错了：${err.message}）` }])
     } finally {
       setBusy(false)
     }
+  }
+
+  // ── 操作卡（对话驱动操作，IDS 2.4）：执行 / 撤销 / 忽略 ──
+  const patchAction = (mi, ai, patch) => {
+    setMessages((ms) =>
+      ms.map((m, x) =>
+        x !== mi ? m : { ...m, actions: m.actions.map((a, y) => (y !== ai ? a : { ...a, ...patch })) }
+      )
+    )
+  }
+
+  const execAction = async (mi, ai) => {
+    const act = messages[mi]?.actions?.[ai]
+    if (!act) return
+    try {
+      const res = await api.executeAction({
+        op: act.op, target: act.target, patch: act.patch || {}, summary: act.summary || '',
+      })
+      if (res.ok) {
+        patchAction(mi, ai, { _done: true, _undo_id: res.undo_id, _error: null })
+        refresh?.()
+        loadAnchors() // 新建的任务/提醒即时成为可点击锚点
+      } else {
+        patchAction(mi, ai, { _error: res.error || '执行失败' })
+      }
+    } catch (err) {
+      patchAction(mi, ai, { _error: err.message })
+    }
+  }
+
+  const undoAction = async (mi, ai) => {
+    const act = messages[mi]?.actions?.[ai]
+    if (!act?._undo_id) return
+    try {
+      const res = await api.undoAction(act._undo_id)
+      if (res.ok) {
+        patchAction(mi, ai, { _done: false, _undo_id: null })
+        refresh?.()
+      } else {
+        patchAction(mi, ai, { _error: res.error || '撤销失败' })
+      }
+    } catch (err) {
+      patchAction(mi, ai, { _error: err.message })
+    }
+  }
+
+  // ── 实体锚点（IDS 2.1 防幻觉）：真实条目名渲染为可点击 ──
+  const anchorMap = anchors.reduce((acc, a) => {
+    if (a.name && a.name.length >= 2 && !acc[a.name]) acc[a.name] = a
+    return acc
+  }, {})
+  const anchorRe = Object.keys(anchorMap).length
+    ? new RegExp(`(${Object.keys(anchorMap)
+        .sort((a, b) => b.length - a.length) // 长名优先，避免子串吞并
+        .map((n) => n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+        .join('|')})`, 'g')
+    : null
+
+  const renderAnchored = (text) => {
+    if (!anchorRe) return text
+    return text.split(anchorRe).map((part, i) => {
+      const a = anchorMap[part]
+      if (!a) return part
+      const view = a.kind === 'project' ? 'projects' : a.kind === 'task' ? 'timeline' : 'knowledge'
+      return (
+        <a key={i} className="entity-anchor" title={a.hint}
+          onClick={() => goView?.(view)}>
+          {part}
+        </a>
+      )
+    })
   }
 
   // 召唤式处理：从闪记视图带来的首批消息自动发送
@@ -211,14 +289,32 @@ export default function ChatView({ refresh, initialMessage, onSeedConsumed, noti
     })
   }
 
+  // 修改后同意（IDS 2.2 三种裁决之一）：改标题/内容再入库
+  const startEditProposal = (idx) => {
+    const p = proposals.proposals[idx]
+    setEditIdx(idx)
+    setEditDraft({ title: p.title || '', detail: p.detail || '' })
+  }
+
+  const saveEditProposal = () => {
+    setProposals((p) => ({
+      ...p,
+      proposals: p.proposals.map((x, i) =>
+        i === editIdx ? { ...x, title: editDraft.title.trim() || x.title, detail: editDraft.detail.trim() || x.detail, _decision: 'approve' } : x
+      ),
+    }))
+    setEditIdx(null)
+  }
+
   const applyAll = async () => {
     const approved = proposals.proposals.filter((p) => p._decision === 'approve')
-    if (approved.length === 0) {
+    const rejected = proposals.proposals.filter((p) => p._decision === 'reject')
+    if (approved.length === 0 && rejected.length === 0) {
       setProposals(null)
       return
     }
     try {
-      const res = await api.applyProposals(approved)
+      const res = await api.applyProposals(approved, rejected)
       // 如实汇报：成功与失败分开说，不谎报全入库
       const ok = res.applied.filter((a) => a.ok !== false)
       const failed = res.applied.filter((a) => a.ok === false)
@@ -229,12 +325,16 @@ export default function ChatView({ refresh, initialMessage, onSeedConsumed, noti
       if (failed.length) {
         parts.push(`未执行 ${failed.length} 条（请手动处理）：\n` + failed.map((a) => `· ${a.title}（${a.error}）`).join('\n'))
       }
+      if (res.flash_closed > 0) {
+        parts.push(`闪记池已同步关闭 ${res.flash_closed} 条`)
+      }
       setMessages((m) => [
         ...m,
-        { role: 'assistant', content: parts.join('\n\n') || '没有可执行的提案。' },
+        { role: 'assistant', content: parts.join('\n\n') || `已记录：丢弃 ${rejected.length} 条提案。` },
       ])
       setProposals(null)
       refresh?.()
+      loadAnchors() // 新建条目即时成为锚点
     } catch (err) {
       setMessages((m) => [
         ...m,
@@ -255,7 +355,35 @@ export default function ChatView({ refresh, initialMessage, onSeedConsumed, noti
         {messages.map((m, i) => (
           <div key={i} className={m.role === 'user' ? 'bubble user' : m.briefing ? 'bubble assistant briefing' : m.notice ? 'bubble assistant notice' : m.feedback ? 'bubble assistant feedback' : 'bubble assistant'}>
             <div className="bubble-name">{m.briefing ? '小白 · 早报' : m.notice ? '小白 · 提醒' : m.feedback ? '小白 · 晚间复盘' : m.role === 'user' ? '我' : '小白'}</div>
-            <div className="bubble-content">{m.content}</div>
+            <div className="bubble-content">
+              {m.role === 'user' ? m.content : renderAnchored(m.content)}
+            </div>
+            {m.actions?.length > 0 && (
+              <div className="action-stack">
+                {m.actions.map((act, j) => (
+                  <div key={j} className={`action-card${act._done ? ' done' : ''}${act._skipped ? ' skipped' : ''}`}>
+                    <div className="action-summary">
+                      <span className="kind-chip">操作</span>
+                      {act.summary || act.op}
+                    </div>
+                    {act._error && <div className="action-error">{act._error}</div>}
+                    {act._done ? (
+                      <div className="action-row">
+                        <span className="action-state">✓ 已执行</span>
+                        <button className="small-btn" onClick={() => undoAction(i, j)}>撤销</button>
+                      </div>
+                    ) : act._skipped ? (
+                      <div className="action-row"><span className="action-state muted">已忽略</span></div>
+                    ) : (
+                      <div className="action-row">
+                        <button className="small-btn primary" onClick={() => execAction(i, j)}>执行</button>
+                        <button className="small-btn" onClick={() => patchAction(i, j, { _skipped: true })}>忽略</button>
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         ))}
         {busy && <div className="bubble assistant"><div className="bubble-name">小白</div><div className="bubble-content typing">…</div></div>}
@@ -272,21 +400,46 @@ export default function ChatView({ refresh, initialMessage, onSeedConsumed, noti
             )}
             {proposals.proposals?.map((p, i) => (
               <div key={i} className={`proposal-item ${p._decision || ''}`}>
-                <div className="proposal-title">
-                  <span className="kind-chip">{p.kind}</span> {p.title}
-                </div>
-                <div className="proposal-detail">{p.detail}</div>
-                <div className="proposal-evidence">来源：{p.evidence}</div>
-                {!p._decision ? (
-                  <div className="proposal-actions">
-                    <button className="small-btn primary" onClick={() => decide(i, 'approve')}>同意</button>
-                    <button className="small-btn" onClick={() => decide(i, 'reject')}>丢弃</button>
-                  </div>
+                {editIdx === i ? (
+                  <>
+                    <input
+                      className="proposal-edit-title"
+                      value={editDraft.title}
+                      onChange={(e) => setEditDraft((d) => ({ ...d, title: e.target.value }))}
+                      placeholder="标题"
+                    />
+                    <textarea
+                      className="proposal-edit-detail"
+                      value={editDraft.detail}
+                      onChange={(e) => setEditDraft((d) => ({ ...d, detail: e.target.value }))}
+                      rows={3}
+                      placeholder="内容"
+                    />
+                    <div className="proposal-actions">
+                      <button className="small-btn primary" onClick={saveEditProposal}>保存并同意</button>
+                      <button className="small-btn" onClick={() => setEditIdx(null)}>取消</button>
+                    </div>
+                  </>
                 ) : (
-                  <div className="proposal-actions">
-                    {p._decision === 'approve' ? '✓ 将入库' : '✗ 已丢弃'}
-                    <button className="small-btn" onClick={() => decide(i, undefined)}>撤销</button>
-                  </div>
+                  <>
+                    <div className="proposal-title">
+                      <span className="kind-chip">{p.kind}</span> {p.title}
+                    </div>
+                    <div className="proposal-detail">{p.detail}</div>
+                    <div className="proposal-evidence">来源：{p.evidence}</div>
+                    {!p._decision ? (
+                      <div className="proposal-actions">
+                        <button className="small-btn primary" onClick={() => decide(i, 'approve')}>同意</button>
+                        <button className="small-btn" onClick={() => startEditProposal(i)}>修改后同意</button>
+                        <button className="small-btn" onClick={() => decide(i, 'reject')}>丢弃</button>
+                      </div>
+                    ) : (
+                      <div className="proposal-actions">
+                        {p._decision === 'approve' ? '✓ 将入库' : '✗ 已丢弃'}
+                        <button className="small-btn" onClick={() => decide(i, undefined)}>撤销</button>
+                      </div>
+                    )}
+                  </>
                 )}
               </div>
             ))}

@@ -184,28 +184,49 @@ def _check_schedule_upcoming():
 
 
 def _check_graveyard():
-    """坟场清理（M5 FR-5.2）：超 14 天未处理的闪记/投放区文件，建议处理或放弃。
+    """坟场清理（M5 FR-5.2）：投放区文件超 14 天未消化，建议处理或放弃。
+    只查投放区文件——闪记池不催（交互定案 IDS 2.5：小白永不主动催闪记）。
     当日去重由 _notify 兜底，每 tick 检查成本可忽略。"""
     cutoff = (datetime.now() - timedelta(days=14)).isoformat(timespec="seconds")
     with get_conn() as conn:
-        old_notes = conn.execute(
-            "SELECT COUNT(*) AS n FROM inbox_items WHERE status = 'pending' AND captured_at < ?",
-            (cutoff,),
-        ).fetchone()["n"]
         old_files = conn.execute(
             "SELECT COUNT(*) AS n FROM raw_files WHERE status = 'untracked' AND first_seen_at < ?",
             (cutoff,),
         ).fetchone()["n"]
-    if old_notes >= 3:
-        _notify("graveyard", "闪记池有内容躺了两周以上",
-                f"{old_notes} 条闪记超过 14 天未处理。处理掉，或者承认不需要、丢弃它们。")
     if old_files >= 3:
         _notify("graveyard", "投放区有文件躺了两周以上",
                 f"{old_files} 个文件超过 14 天未消化。消化它们，或移出投放区。")
 
 
+def _check_weekly_lint():
+    """每周一体检（PRD 4.5 每日节律）：wiki 有问题时发一条通知，每周至多一次。
+    只通知不修复——修复需用户在知识库视图确认（半自动契约）。"""
+    now = datetime.now()
+    if now.weekday() != 0 or now.hour < 8:
+        return
+    week_id = f"{now.isocalendar()[0]}-W{now.isocalendar()[1]}"
+    with get_conn() as conn:
+        row = conn.execute("SELECT value FROM settings WHERE key = 'last_lint_week'").fetchone()
+        if row and row["value"] == week_id:
+            return
+        conn.execute(
+            """INSERT INTO settings (key, value) VALUES ('last_lint_week', ?)
+               ON CONFLICT(key) DO UPDATE SET value = excluded.value""",
+            (week_id,),
+        )
+    from app.routers.wiki import collect_lint
+    try:
+        result = collect_lint()
+    except Exception:
+        return
+    if not result["ok"]:
+        _notify("lint", "知识库体检发现问题",
+                f"{len(result['issues'])} 个问题（孤儿页/core 膨胀/重复实体等），去知识库视图点「体检」看详情。")
+
+
 def _tick():
-    for check in (_check_reminders, _check_due_tasks, _check_schedule_upcoming, _check_graveyard):
+    for check in (_check_reminders, _check_due_tasks, _check_schedule_upcoming, _check_graveyard,
+                  _check_weekly_lint):
         try:
             check()
         except Exception:

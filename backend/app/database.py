@@ -146,7 +146,7 @@ CREATE TABLE IF NOT EXISTS settings (
   value TEXT
 );
 
--- 间隔重现队列（M5 FR-5.1：入库知识按 1/3/7/14/30 天间隔在简报中重现）
+-- 间隔重现队列（M5 FR-5.1：入库知识按倍增间隔 1/3/6/12/24…30 封顶，在简报中重现）
 CREATE TABLE IF NOT EXISTS spaced_reviews (
   id INTEGER PRIMARY KEY,
   page TEXT NOT NULL,                 -- wiki 页相对路径
