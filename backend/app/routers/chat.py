@@ -317,12 +317,14 @@ def list_sessions():
 
 @router.delete("/chat/sessions/{sid}")
 def delete_session(sid: int):
-    """删除会话及其消息（分支会话是独立复制体，不受影响）。"""
+    """删除会话及其消息（分支会话是独立复制体，不受影响，仅解除父引用）。"""
     with get_conn() as conn:
         cur = conn.execute("DELETE FROM chat_sessions WHERE id = ?", (sid,))
         if cur.rowcount == 0:
             raise HTTPException(404, "会话不存在")
         conn.execute("DELETE FROM chat_messages WHERE session_id = ?", (sid,))
+        # 分支的 parent_id 指向本会话 → 置空，避免悬空引用
+        conn.execute("UPDATE chat_sessions SET parent_id = NULL WHERE parent_id = ?", (sid,))
     return {"ok": True}
 
 

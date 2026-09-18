@@ -47,6 +47,7 @@ export default function ChatView({ refresh, initialMessage, onSeedConsumed, noti
 
   // 打开会话：加载其消息（今天的早报等天级消息由后端按需合并）
   const openSession = async (sid) => {
+    if (busy) return // 流式输出中切换会话会让增量写到错误的会话视图上
     setSessionOpen(false)
     setProposals(null)
     try {
@@ -60,6 +61,7 @@ export default function ChatView({ refresh, initialMessage, onSeedConsumed, noti
 
   // 新对话：清空视图即可，首条消息发出时后端自动建会话
   const newSession = () => {
+    if (busy) return
     setSessionOpen(false)
     setProposals(null)
     setMessages([])
@@ -67,6 +69,7 @@ export default function ChatView({ refresh, initialMessage, onSeedConsumed, noti
   }
 
   const removeSession = async (sid) => {
+    if (busy) return
     if (!window.confirm('删除这个对话？消息不可恢复。')) return
     try {
       await api.deleteChatSession(sid)
@@ -82,7 +85,7 @@ export default function ChatView({ refresh, initialMessage, onSeedConsumed, noti
 
   // 从某条消息开分支：复制截至该消息的历史为新会话并切换过去
   const branchFrom = async (m) => {
-    if (!m?.id || !activeSession) return
+    if (busy || !m?.id || !activeSession) return
     try {
       const res = await api.branchSession(activeSession, m.id)
       await loadSessions()
