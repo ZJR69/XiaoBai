@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { api } from '../api.js'
 
-export default function ChatView({ refresh }) {
+export default function ChatView({ refresh, initialMessage, onSeedConsumed }) {
   const [messages, setMessages] = useState([]) // {role, content}
   const [input, setInput] = useState('')
   const [busy, setBusy] = useState(false)
@@ -13,11 +13,9 @@ export default function ChatView({ refresh }) {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages, proposals])
 
-  const send = async (e) => {
-    e?.preventDefault()
-    const text = input.trim()
+  const sendText = async (raw) => {
+    const text = raw.trim()
     if (!text || busy) return
-    setInput('')
     const history = messages.slice(-20)
     setMessages((m) => [...m, { role: 'user', content: text }])
     setBusy(true)
@@ -29,6 +27,23 @@ export default function ChatView({ refresh }) {
     } finally {
       setBusy(false)
     }
+  }
+
+  // 召唤式处理：从闪记视图带来的首批消息自动发送
+  const seedSent = useRef(false)
+  useEffect(() => {
+    if (initialMessage && !seedSent.current) {
+      seedSent.current = true
+      onSeedConsumed?.()
+      sendText(initialMessage)
+    }
+  }, [initialMessage])
+
+  const send = (e) => {
+    e.preventDefault()
+    const text = input
+    setInput('')
+    sendText(text)
   }
 
   // 回顾对话 → 批量提案（防污染：对话中绝不打断，按需回顾）
