@@ -10,7 +10,7 @@ import re
 from datetime import datetime
 from pathlib import Path
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from app import llm
@@ -215,18 +215,36 @@ def _extract_actions(reply: str) -> tuple[str, list[dict]]:
 class ChatIn(BaseModel):
     message: str
     history: list[dict] = []  # [{role, content}]，前端传最近若干轮
+    session_id: int | None = None  # 所属会话；缺省则新建（标题取本条消息）
+
+
+def _ensure_session(session_id: int | None, first_message: str, now: str) -> int:
+    """会话处理：session_id 有效则沿用（并刷新活跃时间），否则新建。返回 session_id。"""
+    with get_conn() as conn:
+        if session_id:
+            row = conn.execute("SELECT id FROM chat_sessions WHERE id = ?", (session_id,)).fetchone()
+            if row:
+                conn.execute("UPDATE chat_sessions SET updated_at = ? WHERE id = ?", (now, session_id))
+                return session_id
+        title = first_message.strip().replace("\n", " ")[:30] or "新对话"
+        cur = conn.execute(
+            "INSERT INTO chat_sessions (title, created_at, updated_at) VALUES (?, ?, ?)",
+            (title, now, now),
+        )
+        return cur.lastrowid
 
 
 @router.post("/chat")
 def chat(body: ChatIn):
     now = datetime.now().isoformat(timespec="seconds")
     today = now[:10]
+    sid = _ensure_session(body.session_id, body.message, now)
 
     # 持久化用户消息（记忆同步的数据源）
     with get_conn() as conn:
         conn.execute(
-            "INSERT INTO chat_messages (session_date, role, content, created_at) VALUES (?, 'user', ?, ?)",
-            (today, body.message, now),
+            "INSERT INTO chat_messages (session_date, role, content, created_at, session_id) VALUES (?, 'user', ?, ?, ?)",
+            (today, body.message, now, sid),
         )
 
     if not llm.llm_available():
@@ -251,10 +269,10 @@ def chat(body: ChatIn):
 
     with get_conn() as conn:
         conn.execute(
-            "INSERT INTO chat_messages (session_date, role, content, created_at) VALUES (?, 'assistant', ?, ?)",
-            (today, reply, now),
+            "INSERT INTO chat_messages (session_date, role, content, created_at, session_id) VALUES (?, 'assistant', ?, ?, ?)",
+            (today, reply, now, sid),
         )
-    return {"reply": reply, "actions": actions}
+    return {"reply": reply, "actions": actions, "session_id": sid}
 
 
 @router.get("/anchors")
@@ -282,37 +300,100 @@ def anchors():
     return {"anchors": out}
 
 
-@router.get("/chat/history")
-def chat_history(date: str | None = None):
-    """拉取某天的对话记录（默认今天）。前端刷新后恢复对话流，不做只写不读的假持久化。"""
-    day = date or datetime.now().isoformat()[:10]
-    with get_conn() as conn:
-        rows = conn.execute(
-            "SELECT role, content, created_at FROM chat_messages WHERE session_date = ? ORDER BY id",
-            (day,),
-        ).fetchall()
-    return {"date": day, "messages": [dict(r) for r in rows]}
+# ── 会话管理（多会话 + 分支，参考常见大模型对话应用）──
 
 
-@router.get("/chat/dates")
-def chat_dates():
-    """历史会话日期列表（最近 30 天有记录的），供前端「历史」下拉选择。"""
+@router.get("/chat/sessions")
+def list_sessions():
+    """会话列表，按最近活跃排序。parent_id 非空 = 分支会话。"""
     with get_conn() as conn:
         rows = conn.execute(
-            """SELECT session_date, COUNT(*) AS n FROM chat_messages
-               GROUP BY session_date ORDER BY session_date DESC LIMIT 30"""
+            """SELECT s.id, s.title, s.parent_id, s.created_at, s.updated_at,
+                      (SELECT COUNT(*) FROM chat_messages m WHERE m.session_id = s.id) AS n
+               FROM chat_sessions s ORDER BY s.updated_at DESC, s.id DESC"""
         ).fetchall()
-    return {"dates": [dict(r) for r in rows]}
+    return {"sessions": [dict(r) for r in rows]}
+
+
+@router.delete("/chat/sessions/{sid}")
+def delete_session(sid: int):
+    """删除会话及其消息（分支会话是独立复制体，不受影响）。"""
+    with get_conn() as conn:
+        cur = conn.execute("DELETE FROM chat_sessions WHERE id = ?", (sid,))
+        if cur.rowcount == 0:
+            raise HTTPException(404, "会话不存在")
+        conn.execute("DELETE FROM chat_messages WHERE session_id = ?", (sid,))
+    return {"ok": True}
+
+
+@router.get("/chat/sessions/{sid}/messages")
+def session_messages(sid: int):
+    """单个会话的消息（含 id，供分支定位）。若会话今天活跃，把今天的早报等
+    天级消息（session_id 为 NULL）按时间序合并进来——它们属于今天，不属于某个会话。"""
+    with get_conn() as conn:
+        sess = conn.execute("SELECT * FROM chat_sessions WHERE id = ?", (sid,)).fetchone()
+        if not sess:
+            raise HTTPException(404, "会话不存在")
+        rows = conn.execute(
+            "SELECT id, role, content, created_at FROM chat_messages WHERE session_id = ? ORDER BY id",
+            (sid,),
+        ).fetchall()
+        msgs = [dict(r) for r in rows]
+        today = datetime.now().isoformat()[:10]
+        if (sess["updated_at"] or "")[:10] == today:
+            day_rows = conn.execute(
+                """SELECT id, role, content, created_at FROM chat_messages
+                   WHERE session_id IS NULL AND session_date = ? ORDER BY id""",
+                (today,),
+            ).fetchall()
+            msgs = sorted([*msgs, *[dict(r) for r in day_rows]], key=lambda m: m["id"])
+    return {"session": dict(sess), "messages": msgs}
+
+
+class BranchIn(BaseModel):
+    message_id: int  # 从哪条消息开始分叉（该消息及之前的全部历史被复制）
+
+
+@router.post("/chat/sessions/{sid}/branch", status_code=201)
+def branch_session(sid: int, body: BranchIn):
+    """开对话分支：复制该会话截至 message_id 的全部消息为新会话，之后各走各路。"""
+    now = datetime.now().isoformat(timespec="seconds")
+    with get_conn() as conn:
+        sess = conn.execute("SELECT * FROM chat_sessions WHERE id = ?", (sid,)).fetchone()
+        if not sess:
+            raise HTTPException(404, "会话不存在")
+        pivot = conn.execute(
+            "SELECT id FROM chat_messages WHERE id = ? AND session_id = ?", (body.message_id, sid)
+        ).fetchone()
+        if not pivot:
+            raise HTTPException(404, "分支点消息不存在或不属于该会话")
+        rows = conn.execute(
+            "SELECT session_date, role, content, created_at FROM chat_messages WHERE session_id = ? AND id <= ? ORDER BY id",
+            (sid, body.message_id),
+        ).fetchall()
+        title = (sess["title"] or "对话") + " · 分支"
+        cur = conn.execute(
+            "INSERT INTO chat_sessions (title, parent_id, created_at, updated_at) VALUES (?, ?, ?, ?)",
+            (title, sid, now, now),
+        )
+        new_sid = cur.lastrowid
+        for r in rows:
+            conn.execute(
+                "INSERT INTO chat_messages (session_date, role, content, created_at, session_id) VALUES (?, ?, ?, ?, ?)",
+                (r["session_date"], r["role"], r["content"], r["created_at"], new_sid),
+            )
+    return {"id": new_sid, "title": title, "parent_id": sid}
 
 
 @router.post("/chat/stream")
 def chat_stream(body: ChatIn):
-    """流式对话（SSE）：增量推 delta，结束时推 {done, reply, actions}。
+    """流式对话（SSE）：增量推 delta，结束时推 {done, reply, actions, session_id}。
     持久化与操作块剥离逻辑与 /api/chat 完全一致。"""
     from fastapi.responses import StreamingResponse
 
     now = datetime.now().isoformat(timespec="seconds")
     today = now[:10]
+    sid = _ensure_session(body.session_id, body.message, now)
 
     def _sse(payload: dict) -> str:
         return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
@@ -320,8 +401,8 @@ def chat_stream(body: ChatIn):
     def gen():
         with get_conn() as conn:
             conn.execute(
-                "INSERT INTO chat_messages (session_date, role, content, created_at) VALUES (?, 'user', ?, ?)",
-                (today, body.message, now),
+                "INSERT INTO chat_messages (session_date, role, content, created_at, session_id) VALUES (?, 'user', ?, ?, ?)",
+                (today, body.message, now, sid),
             )
         full = ""
         if not llm.llm_available():
@@ -348,10 +429,10 @@ def chat_stream(body: ChatIn):
         reply, actions = _extract_actions(full)
         with get_conn() as conn:
             conn.execute(
-                "INSERT INTO chat_messages (session_date, role, content, created_at) VALUES (?, 'assistant', ?, ?)",
-                (today, reply, now),
+                "INSERT INTO chat_messages (session_date, role, content, created_at, session_id) VALUES (?, 'assistant', ?, ?, ?)",
+                (today, reply, now, sid),
             )
-        yield _sse({"done": True, "reply": reply, "actions": actions})
+        yield _sse({"done": True, "reply": reply, "actions": actions, "session_id": sid})
 
     return StreamingResponse(gen(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})

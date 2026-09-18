@@ -12,9 +12,9 @@ export default function ChatView({ refresh, initialMessage, onSeedConsumed, noti
   const [anchors, setAnchors] = useState([]) // 实体锚点名单（真实库条目，IDS 2.1）
   const [editIdx, setEditIdx] = useState(null) // 修改中的提案序号
   const [editDraft, setEditDraft] = useState({ title: '', detail: '' })
-  const [viewingDate, setViewingDate] = useState(null) // 正在查看的历史日期（null=今天）
-  const [historyDates, setHistoryDates] = useState([])
-  const [showHistory, setShowHistory] = useState(false)
+  const [sessions, setSessions] = useState([]) // 会话列表（最近活跃在前）
+  const [activeSession, setActiveSession] = useState(null) // 当前会话 id（null = 新对话，首条消息时后端建）
+  const [sessionOpen, setSessionOpen] = useState(false) // 左侧会话面板开关
   const bottomRef = useRef(null)
   const historyLoaded = useRef(false)
 
@@ -34,17 +34,81 @@ export default function ChatView({ refresh, initialMessage, onSeedConsumed, noti
     notice: m.role === 'assistant' && m.content.startsWith('⏰'),
   })
 
-  // ── 初始化（严格时序：先加载历史 → 再简报 → 再复盘，消除挂载竞态）──
+  // ── 会话管理 ──
+  const loadSessions = async () => {
+    try {
+      const res = await api.listChatSessions()
+      setSessions(res.sessions || [])
+      return res.sessions || []
+    } catch {
+      return []
+    }
+  }
+
+  // 打开会话：加载其消息（今天的早报等天级消息由后端按需合并）
+  const openSession = async (sid) => {
+    setSessionOpen(false)
+    setProposals(null)
+    try {
+      const res = await api.sessionMessages(sid)
+      setMessages(res.messages.map(tagMessage))
+      setActiveSession(sid)
+    } catch (err) {
+      console.error('session load failed:', err)
+    }
+  }
+
+  // 新对话：清空视图即可，首条消息发出时后端自动建会话
+  const newSession = () => {
+    setSessionOpen(false)
+    setProposals(null)
+    setMessages([])
+    setActiveSession(null)
+  }
+
+  const removeSession = async (sid) => {
+    if (!window.confirm('删除这个对话？消息不可恢复。')) return
+    try {
+      await api.deleteChatSession(sid)
+      const rest = await loadSessions()
+      if (sid === activeSession) {
+        if (rest.length > 0) await openSession(rest[0].id)
+        else newSession()
+      }
+    } catch (err) {
+      alert(`删除失败：${err.message}`)
+    }
+  }
+
+  // 从某条消息开分支：复制截至该消息的历史为新会话并切换过去
+  const branchFrom = async (m) => {
+    if (!m?.id || !activeSession) return
+    try {
+      const res = await api.branchSession(activeSession, m.id)
+      await loadSessions()
+      await openSession(res.id)
+    } catch (err) {
+      alert(`分支失败：${err.message}`)
+    }
+  }
+
+  // ── 初始化（严格时序：先打开最近会话 → 再简报 → 再复盘，消除挂载竞态）──
   useEffect(() => {
     if (initialMessage) return
     let cancelled = false
     ;(async () => {
-      // 1. 恢复今日对话
+      // 1. 打开最近活跃的会话（没有则空视图，等首条消息）
       try {
-        const res = await api.chatHistory()
-        if (!cancelled && res.messages.length > 0) setMessages(res.messages.map(tagMessage))
+        const list = await loadSessions()
+        if (!cancelled && list.length > 0) {
+          const res = await api.sessionMessages(list[0].id)
+          if (!cancelled) {
+            setMessages(res.messages.map(tagMessage))
+            setActiveSession(list[0].id)
+          }
+        }
       } catch (err) {
-        console.error('history load failed:', err)
+        console.error('session load failed:', err)
       }
       if (cancelled) return
       historyLoaded.current = true
@@ -167,41 +231,12 @@ export default function ChatView({ refresh, initialMessage, onSeedConsumed, noti
     }
   }
 
-  // ── 历史会话：选日期查看过往记录（只读），一键回到今天 ──
-  const todayStr = () => {
-    const d = new Date()
-    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
-  }
-
-  const toggleHistory = async () => {
-    if (showHistory) {
-      setShowHistory(false)
-      return
-    }
-    try {
-      const res = await api.chatDates()
-      setHistoryDates(res.dates || [])
-    } catch { /* 后端未启动时静默 */ }
-    setShowHistory(true)
-  }
-
-  const loadDate = async (d) => {
-    setShowHistory(false)
-    setProposals(null)
-    try {
-      const res = await api.chatHistory(d || undefined)
-      setMessages(res.messages.map(tagMessage))
-      setViewingDate(d || null)
-    } catch (err) {
-      console.error('history load failed:', err)
-    }
-  }
-
   const sendText = async (raw) => {
     const text = raw.trim()
     if (!text || busy) return
-    if (viewingDate) return // 查看历史记录时不允许发送，先回到今天
-    const history = messages.filter((m) => !m.feedback).slice(-20)
+    const history = messages
+      .filter((m) => !m.feedback && !m.briefing && !m.notice && !m._streaming)
+      .slice(-20)
     setMessages((m) => [...m, { role: 'user', content: text }])
     setBusy(true)
     // 流式：先挂一条空 assistant 消息，增量往上填；<<<ACTION>>> 块不进正文展示
@@ -216,7 +251,10 @@ export default function ChatView({ refresh, initialMessage, onSeedConsumed, noti
           }
           return copy
         })
-      })
+      }, activeSession)
+      // 新建会话（activeSession 原为 null）→ 记住；会话列表标题/排序已变 → 刷新
+      if (final?.session_id && final.session_id !== activeSession) setActiveSession(final.session_id)
+      loadSessions()
       setMessages((ms) => {
         const copy = [...ms]
         const last = copy[copy.length - 1]
@@ -406,6 +444,31 @@ export default function ChatView({ refresh, initialMessage, onSeedConsumed, noti
 
   return (
     <div className="chat-view">
+      {sessionOpen && (
+        <>
+          <div className="session-backdrop" onClick={() => setSessionOpen(false)} />
+          <div className="session-panel">
+            <div className="session-head">
+              对话记录
+              <button className="icon-btn" onClick={() => setSessionOpen(false)}>×</button>
+            </div>
+            <button className="session-new" onClick={newSession}>＋ 新对话</button>
+            <div className="session-list">
+              {sessions.length === 0 && <p className="empty">还没有对话，发第一条消息就开始了。</p>}
+              {sessions.map((s) => (
+                <div key={s.id} className={`session-item${s.id === activeSession ? ' current' : ''}`}>
+                  <button className="session-open" onClick={() => openSession(s.id)} title={s.title}>
+                    {s.parent_id != null && <span className="session-branch-mark" title="分支对话">↳</span>}
+                    <span className="session-title">{s.title || '对话'}</span>
+                    <span className="session-meta">{(s.updated_at || '').slice(5, 10)} · {s.n} 条</span>
+                  </button>
+                  <button className="session-del" onClick={() => removeSession(s.id)} title="删除这个对话">×</button>
+                </div>
+              ))}
+            </div>
+          </div>
+        </>
+      )}
       <div className="chat-scroll">
         {messages.length === 0 && (
           <div className="chat-empty">
@@ -415,7 +478,12 @@ export default function ChatView({ refresh, initialMessage, onSeedConsumed, noti
         )}
         {messages.map((m, i) => (
           <div key={i} className={m.role === 'user' ? 'bubble user' : m.briefing ? 'bubble assistant briefing' : m.notice ? 'bubble assistant notice' : m.feedback ? 'bubble assistant feedback' : 'bubble assistant'}>
-            <div className="bubble-name">{m.briefing ? '小白 · 早报' : m.notice ? '小白 · 提醒' : m.feedback ? '小白 · 晚间复盘' : m.role === 'user' ? '我' : '小白'}</div>
+            <div className="bubble-name">
+              {m.briefing ? '小白 · 早报' : m.notice ? '小白 · 提醒' : m.feedback ? '小白 · 晚间复盘' : m.role === 'user' ? '我' : '小白'}
+              {m.id && !m.briefing && !m.notice && !m.feedback && activeSession && (
+                <button className="branch-btn" onClick={() => branchFrom(m)} title="从这条消息开一个分支，各走各路">分支</button>
+              )}
+            </div>
             <div className="bubble-content">
               {m.role === 'user'
                 ? m.content
@@ -517,41 +585,22 @@ export default function ChatView({ refresh, initialMessage, onSeedConsumed, noti
         <div ref={bottomRef} />
       </div>
 
-      {viewingDate && (
-        <div className="history-banner">
-          正在查看 {viewingDate} 的对话记录（只读）
-          <button type="button" className="small-btn" onClick={() => loadDate(null)}>回到今天</button>
-        </div>
-      )}
-
       <form className="chat-input" onSubmit={send}>
         <input
           value={input}
           onChange={(e) => setInput(e.target.value)}
-          placeholder={viewingDate ? '查看历史记录中，回到今天后可继续对话…' : '和小白说话…'}
-          disabled={busy || !!viewingDate}
+          placeholder="和小白说话…"
+          disabled={busy}
         />
-        <div className="history-wrap">
-          <button type="button" className="review-btn" onClick={toggleHistory} disabled={busy} title="查看历史对话记录">
-            历史
-          </button>
-          {showHistory && (
-            <div className="history-panel">
-              <div className="notify-head">历史会话</div>
-              {historyDates.length === 0 && <p className="empty">还没有对话记录。</p>}
-              {historyDates.map((d) => (
-                <button
-                  key={d.session_date}
-                  className={`history-item${(viewingDate || todayStr()) === d.session_date ? ' current' : ''}`}
-                  onClick={() => loadDate(d.session_date === todayStr() ? null : d.session_date)}
-                >
-                  {d.session_date}
-                  <span className="hint">（{d.n} 条）</span>
-                </button>
-              ))}
-            </div>
-          )}
-        </div>
+        <button
+          type="button"
+          className="review-btn"
+          onClick={() => { if (!sessionOpen) loadSessions(); setSessionOpen(!sessionOpen) }}
+          disabled={busy}
+          title="对话列表：切换、新建、删除、分支"
+        >
+          对话
+        </button>
         {feedbackMode && (
           <button type="button" className="review-btn feedback" onClick={endFeedback} disabled={busy || extracting} title="结束今晚的复盘，小白提取信号校准后续安排">
             {extracting ? '提取中…' : '结束复盘'}

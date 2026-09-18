@@ -60,15 +60,21 @@ export const api = {
   // 对话
   chat: (message, history) =>
     request('/api/chat', { method: 'POST', body: JSON.stringify({ message, history }) }),
-  chatHistory: (date) =>
-    request(`/api/chat/history${date ? `?date=${date}` : ''}`),
-  chatDates: () => request('/api/chat/dates'),
-  // 流式对话（SSE）：onDelta 收增量，返回结束事件 {done, reply, actions}
-  chatStream: async (message, history, onDelta) => {
+  // 会话管理（多会话 + 分支）
+  listChatSessions: () => request('/api/chat/sessions'),
+  deleteChatSession: (id) => request(`/api/chat/sessions/${id}`, { method: 'DELETE' }),
+  sessionMessages: (id) => request(`/api/chat/sessions/${id}/messages`),
+  branchSession: (id, messageId) =>
+    request(`/api/chat/sessions/${id}/branch`, {
+      method: 'POST',
+      body: JSON.stringify({ message_id: messageId }),
+    }),
+  // 流式对话（SSE）：onDelta 收增量，返回结束事件 {done, reply, actions, session_id}
+  chatStream: async (message, history, onDelta, sessionId) => {
     const res = await fetch('/api/chat/stream', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message, history }),
+      body: JSON.stringify({ message, history, session_id: sessionId ?? undefined }),
     })
     if (!res.ok) {
       const detail = await res.json().catch(() => ({}))
