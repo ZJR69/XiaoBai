@@ -174,8 +174,29 @@ def _check_schedule_upcoming():
                 break
 
 
+def _check_graveyard():
+    """坟场清理（M5 FR-5.2）：超 14 天未处理的闪记/投放区文件，建议处理或放弃。
+    当日去重由 _notify 兜底，每 tick 检查成本可忽略。"""
+    cutoff = (datetime.now() - timedelta(days=14)).isoformat(timespec="seconds")
+    with get_conn() as conn:
+        old_notes = conn.execute(
+            "SELECT COUNT(*) AS n FROM inbox_items WHERE status = 'pending' AND captured_at < ?",
+            (cutoff,),
+        ).fetchone()["n"]
+        old_files = conn.execute(
+            "SELECT COUNT(*) AS n FROM raw_files WHERE status = 'untracked' AND first_seen_at < ?",
+            (cutoff,),
+        ).fetchone()["n"]
+    if old_notes >= 3:
+        _notify("graveyard", "闪记池有内容躺了两周以上",
+                f"{old_notes} 条闪记超过 14 天未处理。处理掉，或者承认不需要、丢弃它们。")
+    if old_files >= 3:
+        _notify("graveyard", "投放区有文件躺了两周以上",
+                f"{old_files} 个文件超过 14 天未消化。消化它们，或移出投放区。")
+
+
 def _tick():
-    for check in (_check_reminders, _check_due_tasks, _check_schedule_upcoming):
+    for check in (_check_reminders, _check_due_tasks, _check_schedule_upcoming, _check_graveyard):
         try:
             check()
         except Exception:

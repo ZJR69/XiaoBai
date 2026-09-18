@@ -185,6 +185,35 @@ body {
 /* ── 对话流内的简报/提醒消息 ── */
 .bubble.briefing .bubble-content { background: #f0f7ee; border-left: 3px solid #7ba05b; }
 .bubble.notice .bubble-content { background: #fdf3dd; border-left: 3px solid #c9922a; }
+.bubble.feedback .bubble-content { background: #eef0f7; border-left: 3px solid #6b7ba0; }
+.review-btn.feedback { color: #6b7ba0; border-color: #6b7ba0; }
+
+/* ── 统一搜索（侧栏） ── */
+.search-wrap { position: relative; margin-bottom: 8px; }
+.search-input {
+  width: 100%; box-sizing: border-box; padding: 6px 10px; font-size: 13px;
+  border: 1px solid var(--border); border-radius: 8px;
+  background: var(--card); color: var(--text);
+}
+.search-panel {
+  position: absolute; left: 0; right: 0; top: 34px; z-index: 70; max-height: 380px; overflow-y: auto;
+  background: var(--card); border: 1px solid var(--border); border-radius: 10px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12); padding: 10px; font-size: 13px;
+}
+.search-group { font-size: 11px; color: var(--muted); font-weight: 600; margin: 8px 0 4px; }
+.search-group:first-of-type { margin-top: 0; }
+
+/* ── wiki 编辑器 + 体检面板 ── */
+.wiki-editor {
+  width: 100%; min-height: 320px; box-sizing: border-box; font-family: monospace; font-size: 13px;
+  border: 1px solid var(--border); border-radius: 8px; padding: 10px;
+  background: var(--bg); color: var(--text); resize: vertical;
+}
+.lint-panel {
+  background: var(--card); border: 1px solid var(--border); border-radius: 10px;
+  padding: 10px; margin-bottom: 14px; font-size: 13px;
+}
+.lint-panel .small-btn { margin-top: 6px; }
 .project-desc { font-size: 13px; color: var(--muted); margin: 6px 0; }
 .project-next {
   font-size: 14px; background: #f0ede3; border-radius: 6px; padding: 7px 10px; margin: 8px 0;
