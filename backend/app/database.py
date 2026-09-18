@@ -106,7 +106,17 @@ CREATE TABLE IF NOT EXISTS chat_messages (
   session_date TEXT,
   role TEXT,
   content TEXT NOT NULL,
-  created_at TEXT
+  created_at TEXT,
+  session_id INTEGER               -- 所属会话（NULL = 天级消息：早报等）
+);
+
+-- 对话会话（多会话 + 分支：parent_id 指向被分支的会话）
+CREATE TABLE IF NOT EXISTS chat_sessions (
+  id INTEGER PRIMARY KEY,
+  title TEXT,
+  parent_id INTEGER,
+  created_at TEXT,
+  updated_at TEXT
 );
 
 -- 投放区文件（dropzone 扫描登记 + 消化状态）
@@ -177,6 +187,34 @@ def init_db() -> None:
             conn.execute("ALTER TABLE projects ADD COLUMN category TEXT")
         except sqlite3.OperationalError:
             pass
+        try:
+            conn.execute("ALTER TABLE chat_messages ADD COLUMN session_id INTEGER")
+        except sqlite3.OperationalError:
+            pass
+        # 索引须在列就绪后建（旧库 executescript 时列尚未存在，放 DDL 会崩）
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_chat_messages_session ON chat_messages(session_id)")
+        # 存量迁移：多会话改造前，按日期把旧对话归入每日期一个会话（幂等：二跑无 NULL 普通消息）
+        old_dates = conn.execute(
+            """SELECT DISTINCT session_date FROM chat_messages
+               WHERE session_id IS NULL AND role IN ('user','assistant') AND content NOT LIKE '☀%'"""
+        ).fetchall()
+        for r in old_dates:
+            day = r["session_date"]
+            first = conn.execute(
+                """SELECT content FROM chat_messages WHERE session_date=? AND session_id IS NULL
+                   AND role='user' ORDER BY id LIMIT 1""", (day,)
+            ).fetchone()
+            title = (first["content"][:30] if first else day) or day
+            cur = conn.execute(
+                "INSERT INTO chat_sessions (title, created_at, updated_at) VALUES (?, ?, ?)",
+                (title, day, day),
+            )
+            conn.execute(
+                """UPDATE chat_messages SET session_id=?
+                   WHERE session_date=? AND session_id IS NULL
+                     AND role IN ('user','assistant') AND content NOT LIKE '☀%'""",
+                (cur.lastrowid, day),
+            )
         conn.commit()
     finally:
         conn.close()
