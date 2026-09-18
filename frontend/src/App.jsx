@@ -10,7 +10,7 @@ import LifeView from './views/LifeView.jsx'
 const NAV = [
   { key: 'chat', label: '对话' },
   { key: 'flash', label: '闪记' },
-  { key: 'projects', label: '项目' },
+  { key: 'projects', label: '进行中的事' },
   { key: 'timeline', label: '时间轴' },
   { key: 'knowledge', label: '知识库' },
   { key: 'life', label: '生活角' },

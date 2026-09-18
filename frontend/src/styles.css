@@ -123,7 +123,11 @@ body {
 .project-card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 16px; }
 .project-head { display: flex; justify-content: space-between; align-items: center; }
 .project-name { font-weight: 600; }
-.project-status { font-size: 12px; color: var(--accent); }
+.project-cat {
+  font-size: 11px; color: var(--muted); border: 1px solid var(--border);
+  border-radius: 10px; padding: 1px 8px; margin-left: auto;
+}
+.project-status { font-size: 12px; color: var(--accent); margin-left: 8px; }
 .project-desc { font-size: 13px; color: var(--muted); margin: 6px 0; }
 .project-next {
   font-size: 14px; background: #f0ede3; border-radius: 6px; padding: 7px 10px; margin: 8px 0;
