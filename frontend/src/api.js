@@ -65,6 +65,8 @@ export const api = {
   // 对话
   chat: (message, history) =>
     request('/api/chat', { method: 'POST', body: JSON.stringify({ message, history }) }),
+  chatHistory: (date) =>
+    request(`/api/chat/history${date ? `?date=${date}` : ''}`),
   reviewConversation: (messages) =>
     request('/api/review', { method: 'POST', body: JSON.stringify({ messages }) }),
   applyProposals: (proposals) =>
