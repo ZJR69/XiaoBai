@@ -155,10 +155,20 @@ def digest(body: DigestIn):
             results.append({"path": rel, "ok": True, "note": "课程类资料，仅索引"})
             continue
 
-        # 写 wiki sources 页
+        # 写 wiki sources 页（同名冲突检测：不同源文件同名 stem 不互相覆盖）
         slug = re.sub(r'[\\/:*?"<>|\s]+', "-", p.stem)[:60]
         page_rel = f"sources/{slug}.md"
-        page = DROPZONE.parent.parent / "wiki" / page_rel
+        wiki_root = DROPZONE.parent.parent / "wiki"
+        page = wiki_root / page_rel
+        if page.is_file():
+            existing = page.read_text(encoding="utf-8")
+            if f"source: raw/dropzone/{rel}\n" not in existing:
+                # 已有别的源文件占了同名页 → 加序号
+                n = 2
+                while (wiki_root / f"sources/{slug}-{n}.md").is_file():
+                    n += 1
+                page_rel = f"sources/{slug}-{n}.md"
+                page = wiki_root / page_rel
         page.parent.mkdir(parents=True, exist_ok=True)
         front = (
             f"---\ntype: source\ncreated: {today}\nupdated: {today}\n"

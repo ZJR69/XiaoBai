@@ -4,6 +4,7 @@
 :root {
   --bg: #f7f5f0;
   --panel: #ffffff;
+  --card: #ffffff;
   --side: #efece4;
   --text: #3a3630;
   --muted: #9a948a;
@@ -42,7 +43,8 @@ body {
 }
 .sidebar-status {
   margin-top: auto; padding: 10px 12px; font-size: 12px; color: var(--muted);
-  border-top: 1px solid var(--border); display: flex; gap: 10px;
+  border-top: 1px solid var(--border);
+  display: flex; flex-direction: column; gap: 8px; align-items: stretch;
 }
 
 .main { flex: 1; overflow: hidden; display: flex; flex-direction: column; }
@@ -214,6 +216,19 @@ body {
   padding: 10px; margin-bottom: 14px; font-size: 13px;
 }
 .lint-panel .small-btn { margin-top: 6px; }
+
+/* ── 任务行操作 + 行内编辑 ── */
+.task { display: flex; align-items: center; }
+.task-ops { margin-left: auto; display: flex; gap: 2px; opacity: 0; transition: opacity .15s; }
+.task:hover .task-ops { opacity: 1; }
+.editing-row { gap: 6px; padding: 4px 0; flex-wrap: wrap; }
+.editing-row input, .editing-row select {
+  padding: 5px 8px; border: 1px solid var(--border); border-radius: 6px;
+  background: var(--card); color: var(--text); font-size: 13px;
+}
+.editing-row .edit-title { flex: 1; min-width: 140px; }
+.form-error { color: var(--danger); font-size: 13px; margin: 6px 0; }
+.schedule-block.editing { outline: 2px solid var(--accent); }
 .project-desc { font-size: 13px; color: var(--muted); margin: 6px 0; }
 .project-next {
   font-size: 14px; background: #f0ede3; border-radius: 6px; padding: 7px 10px; margin: 8px 0;

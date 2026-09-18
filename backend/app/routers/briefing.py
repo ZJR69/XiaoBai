@@ -45,11 +45,11 @@ def _due_reviews(today: str) -> list[str]:
 
 
 def _advance_reviews(today: str):
-    """简报生成后推进到期条目的下一次重现时间"""
-    from datetime import timedelta
+    """简报生成后推进到期条目的下一次重现时间。
+    排序与 _due_reviews 严格一致（ORDER BY next_review_at），保证展示的和被推进的是同一批。"""
     with get_conn() as conn:
         rows = conn.execute(
-            "SELECT id, interval_days FROM spaced_reviews WHERE next_review_at <= ? LIMIT 2",
+            "SELECT id, interval_days FROM spaced_reviews WHERE next_review_at <= ? ORDER BY next_review_at LIMIT 2",
             (today,),
         ).fetchall()
         for r in rows:
@@ -132,13 +132,11 @@ def _generate() -> str:
     data = _build_briefing_data()
     if llm.llm_available():
         try:
-            content = llm.chat_completion(
+            return llm.chat_completion(
                 [{"role": "system", "content": BRIEFING_PROMPT},
                  {"role": "user", "content": data}],
                 temperature=0.4,
             )
-            _advance_reviews(_today())  # 展示过的条目推进间隔
-            return content
         except Exception as e:
             # LLM 失败降级：模板版简报（保证每天早上有东西看）
             return _template(data, f"（LLM 暂不可用：{e}）")
@@ -165,6 +163,7 @@ def _get_or_create(today: str) -> dict:
         if row:
             return dict(row)
     content = _generate()
+    _advance_reviews(today)  # 只在当天首次生成时推进（refresh 重生成不重复推进）
     now = datetime.now().isoformat(timespec="seconds")
     with get_conn() as conn:
         conn.execute(
@@ -203,9 +202,20 @@ def should_show():
 
 @router.post("/mark-shown")
 def mark_shown():
+    """标记已展示 + 把简报写入今日对话流（切视图/刷新后可从历史恢复，不再丢失）"""
+    today = _today()
+    now = datetime.now().isoformat(timespec="seconds")
     with get_conn() as conn:
-        conn.execute(
-            "UPDATE briefings SET shown_at = ? WHERE date = ?",
-            (datetime.now().isoformat(timespec="seconds"), _today()),
-        )
+        row = conn.execute("SELECT content, shown_at FROM briefings WHERE date = ?", (today,)).fetchone()
+        if not row:
+            return {"ok": False, "error": "今天还没有简报"}
+        if not row["shown_at"]:
+            conn.execute(
+                "UPDATE briefings SET shown_at = ? WHERE date = ?", (now, today)
+            )
+            # 幂等：只写一次（以 shown_at 为准），☀ 前缀供前端识别样式
+            conn.execute(
+                "INSERT INTO chat_messages (session_date, role, content, created_at) VALUES (?, 'assistant', ?, ?)",
+                (today, f"☀ {row['content']}", now),
+            )
     return {"ok": True}

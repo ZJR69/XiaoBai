@@ -17,11 +17,6 @@ export const api = {
   capture: (content) =>
     request('/api/capture', { method: 'POST', body: JSON.stringify({ content }) }),
   listInbox: () => request('/api/inbox'),
-  confirmInbox: (id, type, title) =>
-    request(`/api/inbox/${id}/confirm`, {
-      method: 'POST',
-      body: JSON.stringify({ type, title }),
-    }),
   discardInbox: (id) => request(`/api/inbox/${id}/discard`, { method: 'POST' }),
 
   // 任务

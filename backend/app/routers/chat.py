@@ -378,11 +378,21 @@ def apply_proposals(body: ProposalDecision):
                 if p.get("evidence"):
                     body_text += f"\n> 来源对话：{p['evidence']}\n"
                 page.parent.mkdir(parents=True, exist_ok=True)
-                page.write_text(front + body_text, encoding="utf-8")
+                if page.is_file():
+                    # 同名知识二次入库：追加为带日期的更新节，不静默覆盖旧内容
+                    old = page.read_text(encoding="utf-8")
+                    update_section = f"\n\n## 更新 {today}\n\n{p.get('detail', '')}\n"
+                    if p.get("evidence"):
+                        update_section += f"\n> 来源对话：{p['evidence']}\n"
+                    page.write_text(old.rstrip() + update_section, encoding="utf-8")
+                    note = "同名页已存在，追加为更新节"
+                else:
+                    page.write_text(front + body_text, encoding="utf-8")
+                    note = "新建知识页"
+                    _register_review(page_rel, title)  # 间隔重现登记（仅新建时）
                 _update_index(page_rel, title)
                 _append_log(f"## [{today}] ingest | 对话沉淀：{title}")
-                result = {"kind": "knowledge", "title": title, "page": page_rel, "ok": True}
-                _register_review(page_rel, title)  # 间隔重现登记
+                result = {"kind": "knowledge", "title": title, "page": page_rel, "ok": True, "note": note}
             elif p.get("kind") == "core":
                 title = (p.get("title") or "杂项").strip()
                 ok, note = _write_core_section(title, p.get("detail", ""))
