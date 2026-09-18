@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { api } from './api.js'
 import ChatView from './views/ChatView.jsx'
 import FlashView from './views/FlashView.jsx'
@@ -101,11 +101,77 @@ function WatchTip({ onGoRaw }) {
   )
 }
 
+// 通知中心：轮询调度器触发的通知（提醒/截止/日程预告），铃铛角标 + 点开列表
+function NotifyBell({ onImportant }) {
+  const [items, setItems] = useState([])
+  const [open, setOpen] = useState(false)
+  const seen = useRef(new Set())
+
+  useEffect(() => {
+    let timer
+    const poll = async () => {
+      try {
+        const list = await api.listNotifications()
+        setItems(list)
+        // 重要通知（截止临近）：只对首次出现的推给 ChatView 即时插入
+        const fresh = list.find((n) => n.important && !seen.current.has(n.id))
+        if (fresh) {
+          seen.current.add(fresh.id)
+          onImportant?.(fresh)
+        }
+        list.forEach((n) => seen.current.add(n.id))
+      } catch {
+        /* 后端未启动时静默 */
+      }
+    }
+    poll()
+    timer = setInterval(poll, 15000)
+    return () => clearInterval(timer)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  const openItems = items.filter((n) => !n.dismissed_at)
+  const dismissAll = async () => {
+    await api.dismissNotifications(openItems.map((n) => n.id))
+    setItems(await api.listNotifications().catch(() => items))
+  }
+
+  return (
+    <div className="notify-wrap">
+      <button className="notify-bell" onClick={() => setOpen((o) => !o)} title="通知">
+        🔔
+        {openItems.length > 0 && <span className="nav-badge">{openItems.length}</span>}
+      </button>
+      {open && (
+        <div className="notify-panel">
+          <div className="notify-head">
+            通知
+            {openItems.length > 0 && (
+              <button className="small-btn" onClick={dismissAll}>全部处理</button>
+            )}
+          </div>
+          {openItems.length === 0 && <p className="empty">没有待处理的通知。</p>}
+          {openItems.map((n) => (
+            <div key={n.id} className="notify-item">
+              <div className="notify-title">
+                <span className={`kind-chip ${n.kind}`}>{n.kind === 'due' ? '截止' : n.kind === 'schedule' ? '日程' : '提醒'}</span>
+                {n.title}
+              </div>
+              {n.detail && <div className="notify-detail">{n.detail}</div>}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 export default function App() {
   const [view, setView] = useState('chat')
   const [status, setStatus] = useState({ openTasks: 0, inbox: 0, reminders: 0 })
   const [refreshKey, setRefreshKey] = useState(0)
   const [chatSeed, setChatSeed] = useState(null)
+  const [notice, setNotice] = useState(null)
   const refresh = () => setRefreshKey((k) => k + 1)
 
   useEffect(() => {
@@ -123,6 +189,7 @@ export default function App() {
       <aside className="sidebar">
         <div className="logo">
           <h1>小白</h1>
+          <NotifyBell onImportant={(n) => setNotice({ ...n, ts: Date.now() })} />
         </div>
         <nav className="nav">
           {NAV.map((n) => (
@@ -152,6 +219,8 @@ export default function App() {
             refresh={refresh}
             initialMessage={chatSeed}
             onSeedConsumed={() => setChatSeed(null)}
+            notice={view === 'chat' ? notice : null}
+            onNoticeConsumed={() => setNotice(null)}
           />
         )}
         {view === 'flash' && (
