@@ -71,6 +71,9 @@ def update_task(task_id: int, patch: TaskPatch):
         if patch.status == "done":
             updates.append("completed_at = ?")
             params.append(datetime.now().isoformat(timespec="seconds"))
+        elif patch.status in ("backlog", "active"):
+            # 重新打开：清掉完成时间残留
+            updates.append("completed_at = NULL")
         if not updates:
             raise HTTPException(400, "没有需要更新的字段")
         params.append(task_id)
@@ -81,6 +84,8 @@ def update_task(task_id: int, patch: TaskPatch):
 @router.delete("/{task_id}")
 def delete_task(task_id: int):
     with get_conn() as conn:
+        # 先脱离挂靠的进展日志（FK 约束会阻断直接删除；日志保留，不随任务蒸发）
+        conn.execute("UPDATE progress_logs SET task_id = NULL WHERE task_id = ?", (task_id,))
         cur = conn.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
         if cur.rowcount == 0:
             raise HTTPException(404, "任务不存在")

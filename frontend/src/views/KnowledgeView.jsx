@@ -8,8 +8,8 @@ const STATUS_META = {
   untracked: { label: '未归档', cls: 'st-untracked' },
 }
 
-export default function KnowledgeView({ refreshKey }) {
-  const [tab, setTab] = useState('wiki') // wiki | raw
+export default function KnowledgeView({ refreshKey, initialTab }) {
+  const [tab, setTab] = useState(initialTab || 'wiki') // wiki | raw
   const [pages, setPages] = useState([])
   const [reading, setReading] = useState(null)
   const [editing, setEditing] = useState(false)

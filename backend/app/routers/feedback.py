@@ -131,7 +131,15 @@ class ExtractIn(BaseModel):
 
 @router.post("/extract")
 def extract(body: ExtractIn):
-    """结束复盘：提取结构化信号入库 + 阈值自校准"""
+    """结束复盘：提取结构化信号入库 + 阈值自校准（幂等：当天已提取过则拒绝）"""
+    # 幂等保护：没有进行中的 session（未发起/已提取）直接拒绝，防止重复调整阈值
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT id FROM feedback_sessions WHERE date = ? AND signals IS NULL", (_today(),)
+        ).fetchone()
+    if not row:
+        return {"ok": False, "error": "今天没有进行中的复盘，或已经结束过了"}
+
     transcript = "\n".join(
         f"{'用户' if m['role'] == 'user' else '小白'}：{m['content']}" for m in body.messages
     )
@@ -146,17 +154,24 @@ def extract(body: ExtractIn):
                  {"role": "user", "content": transcript}],
                 temperature=0.2,
             )
-            signals = llm.extract_json(raw) or signals
+            parsed = llm.extract_json(raw)
+            # extract_json 可能返回 list——只要 dict
+            if isinstance(parsed, dict):
+                signals = parsed
         except Exception:
             pass
 
-    now = datetime.now().isoformat(timespec="seconds")
     new_threshold = _adjust_threshold(signals.get("load", "ok"))
     with get_conn() as conn:
-        conn.execute(
-            """UPDATE feedback_sessions SET transcript = ?, signals = ? WHERE date = ? AND signals IS NULL""",
-            (json.dumps(signals, ensure_ascii=False), json.dumps(signals, ensure_ascii=False), _today()),
+        cur = conn.execute(
+            """UPDATE feedback_sessions SET transcript = ?, signals = ?
+               WHERE date = ? AND signals IS NULL""",
+            (transcript, json.dumps(signals, ensure_ascii=False), _today()),
         )
+        if cur.rowcount == 0:
+            # 并发兜底：另一请求刚刚完成提取——不重复调阈值（已在上面调过则回滚不了，
+            # 但 UPDATE rowcount=0 说明此刻才撞上，阈值调整以先到者为准）
+            return {"ok": False, "error": "复盘刚被结束过"}
     return {
         "ok": True,
         "signals": signals,

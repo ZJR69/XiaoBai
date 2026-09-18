@@ -69,31 +69,35 @@ function FlashPopup({ onCaptured }) {
 function WatchTip({ onGoRaw }) {
   const [since, setSince] = useState(null)
   const [count, setCount] = useState(0)
+  const sinceRef = useRef(null)
 
   useEffect(() => {
-    let timer
     const poll = async () => {
       try {
-        const res = await api.rawEvents(since ?? 0)
-        if (since === null) {
+        const res = await api.rawEvents(sinceRef.current ?? 0)
+        if (sinceRef.current === null) {
           // 首次：建立基线，不提示历史事件
-          setSince(res.now)
+          sinceRef.current = res.now
         } else if (res.count > 0) {
           setCount(res.count)
-          setSince(res.now)
+          sinceRef.current = res.now
         }
       } catch {
         /* 后端未启动时静默 */
       }
     }
     poll()
-    timer = setInterval(poll, 15000)
+    const timer = setInterval(poll, 15000)
     return () => clearInterval(timer)
-  }, [since])
+  }, [])
 
   if (count === 0) return null
+  const goRaw = () => {
+    setCount(0) // 处理意图已表达，提示清零（下次新事件再提示）
+    onGoRaw()
+  }
   return (
-    <div className="watch-tip" onClick={onGoRaw} title="点击去原料区处理">
+    <div className="watch-tip" onClick={goRaw} title="点击去原料区处理">
       投放区有动静（{count} 个事件）
       <br />
       要消化吗？
@@ -113,12 +117,12 @@ function NotifyBell({ onImportant }) {
       try {
         const list = await api.listNotifications()
         setItems(list)
-        // 重要通知（截止临近）：只对首次出现的推给 ChatView 即时插入
-        const fresh = list.find((n) => n.important && !seen.current.has(n.id))
-        if (fresh) {
-          seen.current.add(fresh.id)
-          onImportant?.(fresh)
-        }
+        // 重要通知（截止临近）：首次出现的推给 ChatView 即时插入（同轮多条全推）
+        const fresh = list.filter((n) => n.important && !seen.current.has(n.id))
+        fresh.forEach((n) => {
+          seen.current.add(n.id)
+          onImportant?.(n)
+        })
         list.forEach((n) => seen.current.add(n.id))
       } catch {
         /* 后端未启动时静默 */
@@ -230,6 +234,7 @@ export default function App() {
   const [refreshKey, setRefreshKey] = useState(0)
   const [chatSeed, setChatSeed] = useState(null)
   const [notice, setNotice] = useState(null)
+  const [knowledgeTab, setKnowledgeTab] = useState('wiki')
   const refresh = () => setRefreshKey((k) => k + 1)
 
   useEffect(() => {
@@ -265,7 +270,7 @@ export default function App() {
         </nav>
         <div className="sidebar-status">
           <SearchBox />
-          <WatchTip onGoRaw={() => setView('knowledge')} />
+          <WatchTip onGoRaw={() => { setKnowledgeTab('raw'); setView('knowledge') }} />
           <div>待办 {status.openTasks}</div>
           <div>闪记 {status.inbox}</div>
           <div>提醒 {status.reminders}</div>
@@ -287,7 +292,7 @@ export default function App() {
         )}
         {view === 'projects' && <ProjectsView refreshKey={refreshKey} refresh={refresh} />}
         {view === 'timeline' && <TimelineView refreshKey={refreshKey} refresh={refresh} />}
-        {view === 'knowledge' && <KnowledgeView refreshKey={refreshKey} />}
+        {view === 'knowledge' && <KnowledgeView refreshKey={refreshKey} initialTab={knowledgeTab} />}
         {view === 'life' && <LifeView refreshKey={refreshKey} refresh={refresh} />}
       </main>
 

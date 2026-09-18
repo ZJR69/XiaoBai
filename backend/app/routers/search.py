@@ -20,6 +20,9 @@ def search(q: str):
     if len(q) < 2:
         return {"q": q, "wiki": [], "tasks": [], "projects": []}
 
+    # LIKE 通配符转义（% _ 当普通字符）
+    like = q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
     # wiki 全文（含 core/entities/topics/sources）
     wiki_hits = []
     ql = q.lower()
@@ -46,12 +49,12 @@ def search(q: str):
 
     with get_conn() as conn:
         tasks = conn.execute(
-            "SELECT id, title, status, due_at FROM tasks WHERE title LIKE ? ORDER BY id DESC LIMIT 20",
-            (f"%{q}%",),
+            "SELECT id, title, status, due_at FROM tasks WHERE title LIKE ? ESCAPE '\\' ORDER BY id DESC LIMIT 20",
+            (f"%{like}%",),
         ).fetchall()
         projects = conn.execute(
-            "SELECT id, name, category, status FROM projects WHERE name LIKE ? OR description LIKE ? ORDER BY id DESC LIMIT 20",
-            (f"%{q}%", f"%{q}%"),
+            "SELECT id, name, category, status FROM projects WHERE name LIKE ? ESCAPE '\\' OR description LIKE ? ESCAPE '\\' ORDER BY id DESC LIMIT 20",
+            (f"%{like}%", f"%{like}%"),
         ).fetchall()
 
     return {

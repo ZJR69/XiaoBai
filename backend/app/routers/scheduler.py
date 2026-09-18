@@ -23,13 +23,21 @@ SCHEDULE_AHEAD_MIN = 15  # 日程开始前 15 分钟预告
 
 # ── 日程匹配（schedule.py 的 today 端点也复用） ──
 
+def _semester_week(d: date) -> int:
+    """教学周序号：学年 9 月起（1–8 月算上一学年），从 9 月 1 日所在周的周一起算第 1 周。
+    修复：春季学期（9 月前）不再算出负数周导致单双周错乱。"""
+    sep1_year = d.year if d.month >= 9 else d.year - 1
+    sep1 = date(sep1_year, 9, 1)
+    semester_start_monday = sep1 - timedelta(days=sep1.weekday())
+    return max(1, ((d - semester_start_monday).days // 7) + 1)
+
+
 def slots_for_date(d: date | None = None) -> list[dict]:
     """某天生效的日程（星期 + 单双周 + 有效范围）"""
     d = d or datetime.now().date()
     dow = d.weekday()
     iso = d.isoformat()
-    # 教学周序号（从 9 月 1 日那周起算，用于单双周判断）
-    week_no = ((d - date(d.year, 9, 1)).days // 7) + 1
+    week_no = _semester_week(d)
     with get_conn() as conn:
         rows = conn.execute(
             "SELECT * FROM schedule_slots WHERE day_of_week = ?", (dow,)
@@ -138,13 +146,14 @@ def _check_due_tasks():
                WHERE due_at IS NOT NULL AND status IN ('backlog', 'active')"""
         ).fetchall()
     for t in rows:
+        raw_due = t["due_at"]
         try:
-            due = datetime.fromisoformat(t["due_at"])
+            if len(raw_due) == 10:  # 纯日期：按当天结束时刻算，白天也能触发截止提醒
+                due = datetime.fromisoformat(raw_due + "T23:59")
+            else:
+                due = datetime.fromisoformat(raw_due)
         except ValueError:
-            try:
-                due = datetime.fromisoformat(t["due_at"] + "T23:59")
-            except ValueError:
-                continue
+            continue
         remaining = due - now
         if timedelta(0) <= remaining <= timedelta(hours=DUE_AHEAD_HOURS):
             hours_left = remaining.total_seconds() / 3600
