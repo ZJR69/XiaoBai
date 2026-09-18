@@ -159,7 +159,7 @@ function NotifyBell({ onImportant }) {
             <div key={n.id} className="notify-item">
               <div className="notify-title">
                 <span className={`kind-chip ${n.kind}`}>
-                  {n.kind === 'due' ? '截止' : n.kind === 'schedule' ? '日程' : n.kind === 'graveyard' ? '待清理' : '提醒'}
+                  {n.kind === 'due' ? '截止' : n.kind === 'schedule' ? '日程' : n.kind === 'graveyard' ? '待清理' : n.kind === 'lint' ? '体检' : '提醒'}
                 </span>
                 {n.title}
               </div>
@@ -285,6 +285,7 @@ export default function App() {
             onSeedConsumed={() => setChatSeed(null)}
             notice={view === 'chat' ? notice : null}
             onNoticeConsumed={() => setNotice(null)}
+            goView={setView}
           />
         )}
         {view === 'flash' && (

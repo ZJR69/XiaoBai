@@ -64,8 +64,15 @@ export const api = {
     request(`/api/chat/history${date ? `?date=${date}` : ''}`),
   reviewConversation: (messages) =>
     request('/api/review', { method: 'POST', body: JSON.stringify({ messages }) }),
-  applyProposals: (proposals) =>
-    request('/api/proposals/apply', { method: 'POST', body: JSON.stringify({ proposals }) }),
+  applyProposals: (proposals, rejected = []) =>
+    request('/api/proposals/apply', { method: 'POST', body: JSON.stringify({ proposals, rejected }) }),
+
+  // 对话驱动操作（确认卡：执行/撤销）+ 实体锚点
+  executeAction: (action) =>
+    request('/api/chat/execute', { method: 'POST', body: JSON.stringify(action) }),
+  undoAction: (undoId) =>
+    request('/api/chat/undo', { method: 'POST', body: JSON.stringify({ undo_id: undoId }) }),
+  listAnchors: () => request('/api/anchors'),
 
   // 日程表（M4）
   listSchedule: () => request('/api/schedule'),

@@ -84,12 +84,9 @@ def save_page(body: SavePageIn):
     return {"ok": True, "path": rel}
 
 
-@router.get("/lint")
-def lint():
-    """Wiki 体检（M5 记忆整理，Auto Dream 式）：只报告，修复需用户确认。
-    检查项：core.md 精炼度 / index 与实际文件一致性 / 孤儿页 / 重复实体。"""
-    from app.routers.raw import INDEX_SECTIONS
-
+def collect_lint() -> dict:
+    """体检逻辑（路由与每周调度共用，M5 记忆整理）。只报告，修复需用户确认。
+    检查项：core.md 精炼度 / index 与实际文件一致性 / 孤儿页 / 重复实体 / 死链重现。"""
     issues = []
 
     # 1. core.md 精炼度（注意力预算，PRD 4.6）
@@ -138,6 +135,12 @@ def lint():
                        "paths": dead})
 
     return {"ok": len(issues) == 0, "issues": issues, "checked": len(actual)}
+
+
+@router.get("/lint")
+def lint():
+    """Wiki 体检（M5 记忆整理，Auto Dream 式）：只报告，修复需用户确认。"""
+    return collect_lint()
 
 
 class FixIn(BaseModel):

@@ -5,6 +5,7 @@
 - 关键词触发：消息提到某项目/人物名 → 自动附加其详情（进展日志/实体页）
 - 「回顾对话」→ 批量提案（含去向 task/update/knowledge/core/entity），所有入库经用户裁决（防污染铁律）
 """
+import json
 import re
 from datetime import datetime
 from pathlib import Path
@@ -175,7 +176,40 @@ SYSTEM_PROMPT = """你是「小白」，用户的个人管理智能体，常驻�
 约束：
 - 只引用下方【当前状态】里真实存在的条目，不要编造不存在的任务或项目
 - 回复简洁，说重点，必要时用短列表
-- 用户说「处理这几条闪记」时：逐条理解，看懂的就提议去向（建任务/知识/丢弃，给出建议的标题、日期、归属），看不懂或有歧义就先问清楚再动手；永远等用户确认"""
+- 用户说「处理这几条闪记」时：逐条理解，看懂的就提议去向（建任务/知识/丢弃，给出建议的标题、日期、归属），看不懂或有歧义就先问清楚再动手；永远等用户确认
+
+操作指令（对话驱动操作，用户点确认后才会执行）：
+- 用户让你做事（建任务、改日期、推截止、勾完成、加提醒）时，先用一两句自然的话回应，然后在回复最末尾输出一个操作块：
+<<<ACTION>>>
+{"op": "create_task", "target": null, "patch": {"title": "任务名", "due_at": "YYYY-MM-DD", "priority": 3}, "summary": "一句话说明这个操作做什么"}
+<<<END>>>
+- op 可选值：
+  create_task（patch: title 必填，due_at/priority 可选，priority 1高-5低）
+  update_task（target 填要改的任务名，patch 只放要改的字段：due_at/priority/title/status）
+  complete_task（target 填要完成的任务名，不需要 patch）
+  create_reminder（patch: title、trigger_type: once/daily/weekly/interval、trigger_value 如 2026-10-01T09:00 或 09:00 或 2-09:00 或 4）
+- 日期一律 YYYY-MM-DD；target 必须是【当前状态】里真实存在的条目名
+- 只是聊天、回答问题、给建议时不输出操作块；信息不全先问清楚，别猜着填"""
+
+
+ACTION_BLOCK = re.compile(r"<<<ACTION>>>(.*?)<<<END>>>", re.DOTALL)
+
+
+def _extract_actions(reply: str) -> tuple[str, list[dict]]:
+    """从回复中剥离操作块：返回 (纯文本, 操作列表)。解析失败的块丢弃不执行。"""
+    actions = []
+
+    def _repl(m):
+        try:
+            a = json.loads(m.group(1).strip())
+        except json.JSONDecodeError:
+            return ""
+        if isinstance(a, dict) and a.get("op"):
+            actions.append(a)
+        return ""
+
+    text = ACTION_BLOCK.sub(_repl, reply).strip()
+    return text, actions
 
 
 class ChatIn(BaseModel):
@@ -212,12 +246,40 @@ def chat(body: ChatIn):
         except Exception as e:  # LLM 调用失败不能让对话崩掉
             reply = f"（调用大模型失败：{e}。请检查 API key 和网络。）"
 
+    # 剥离操作块：正文持久化纯文本，操作以结构化卡片返回前端（用户确认后才执行）
+    reply, actions = _extract_actions(reply)
+
     with get_conn() as conn:
         conn.execute(
             "INSERT INTO chat_messages (session_date, role, content, created_at) VALUES (?, 'assistant', ?, ?)",
             (today, reply, now),
         )
-    return {"reply": reply}
+    return {"reply": reply, "actions": actions}
+
+
+@router.get("/anchors")
+def anchors():
+    """实体锚点名单（IDS 2.1 防幻觉）：对话中这些真实条目名可点击跳转。
+    锚点数据来自真实库——小白不能引用不存在的条目。"""
+    out = []
+    with get_conn() as conn:
+        for p in conn.execute(
+            "SELECT name, category FROM projects WHERE status != 'closed'"
+        ).fetchall():
+            out.append({"name": p["name"], "kind": "project", "hint": "进行中的事"})
+        for t in conn.execute(
+            "SELECT title, status, due_at FROM tasks WHERE status IN ('backlog', 'active')"
+        ).fetchall():
+            due = f"，截止 {t['due_at'][:10]}" if t["due_at"] else ""
+            out.append({"name": t["title"], "kind": "task", "hint": f"任务 [{t['status']}]{due}"})
+    for sub in ("entities", "topics", "sources"):
+        d = WIKI_DIR / sub
+        if d.exists():
+            for f in sorted(d.glob("*.md")):
+                title = _page_title(f, f.stem)
+                if title and len(title) >= 2:
+                    out.append({"name": title, "kind": "wiki", "hint": "知识库页"})
+    return {"anchors": out}
 
 
 @router.get("/chat/history")
@@ -230,6 +292,134 @@ def chat_history(date: str | None = None):
             (day,),
         ).fetchall()
     return {"date": day, "messages": [dict(r) for r in rows]}
+
+
+# ── 对话驱动操作（IDS 1.1/2.4：操作指令 → 确认卡 → 执行/撤销）──
+
+TASK_STATUSES = ("backlog", "active", "done", "cancelled")
+TASK_FIELDS = ("title", "status", "priority", "due_at", "project_id")
+
+
+class ActionIn(BaseModel):
+    op: str  # create_task / update_task / complete_task / create_reminder
+    target: str | None = None
+    patch: dict = {}
+    summary: str = ""
+
+
+def _find_task(conn, name: str):
+    """按名称精确 → 模糊匹配任务"""
+    exact = conn.execute(
+        "SELECT id, title FROM tasks WHERE title = ? LIMIT 1", (name,)
+    ).fetchone()
+    if exact:
+        return exact
+    return conn.execute(
+        "SELECT id, title FROM tasks WHERE title LIKE ? ORDER BY id LIMIT 1", (f"%{name}%",)
+    ).fetchone()
+
+
+@router.post("/chat/execute")
+def execute_action(body: ActionIn):
+    """执行操作卡（用户点「执行」后才调用——半自动契约）。
+    留痕 + 存 pre-image 供撤销。"""
+    now = datetime.now().isoformat(timespec="seconds")
+    today = now[:10]
+    with get_conn() as conn:
+        pre_image = None
+        target_id = None
+        if body.op == "create_task":
+            title = str(body.patch.get("title") or "").strip()
+            if not title:
+                return {"ok": False, "error": "create_task 需要 title"}
+            cur = conn.execute(
+                "INSERT INTO tasks (title, status, priority, due_at, created_at) VALUES (?, 'backlog', ?, ?, ?)",
+                (title, body.patch.get("priority", 3), body.patch.get("due_at"), now),
+            )
+            target_id = cur.lastrowid
+        elif body.op in ("update_task", "complete_task"):
+            target = (body.target or "").strip()
+            row = _find_task(conn, target) if target else None
+            if not row:
+                return {"ok": False, "error": f"没找到任务「{target or ''}」"}
+            if body.op == "complete_task":
+                patch = {"status": "done"}
+            else:
+                patch = {k: v for k, v in body.patch.items() if k in TASK_FIELDS}
+                if "status" in patch and patch["status"] not in TASK_STATUSES:
+                    return {"ok": False, "error": f"status 必须是 {TASK_STATUSES} 之一"}
+                if not patch:
+                    return {"ok": False, "error": "update_task 没有可改字段"}
+            old = conn.execute("SELECT * FROM tasks WHERE id = ?", (row["id"],)).fetchone()
+            pre_image = {k: old[k] for k in patch}  # 撤销用旧值快照
+            sets = ", ".join(f"{k} = ?" for k in patch)
+            params = list(patch.values())
+            if patch.get("status") == "done":
+                sets += ", completed_at = ?"
+                params.append(now)
+            elif patch.get("status") in ("backlog", "active"):
+                sets += ", completed_at = NULL"
+            params.append(row["id"])
+            conn.execute(f"UPDATE tasks SET {sets} WHERE id = ?", params)
+            target_id = row["id"]
+        elif body.op == "create_reminder":
+            from app.routers.reminders import _normalize_trigger
+            tt = body.patch.get("trigger_type", "once")
+            tv = _normalize_trigger(tt, body.patch.get("trigger_value"))
+            cur = conn.execute(
+                "INSERT INTO reminders (title, trigger_type, trigger_value) VALUES (?, ?, ?)",
+                (str(body.patch.get("title") or body.summary or "提醒").strip(), tt, tv),
+            )
+            target_id = cur.lastrowid
+        else:
+            return {"ok": False, "error": f"未知操作 {body.op}"}
+
+        cur = conn.execute(
+            "INSERT INTO agent_suggestions (date, kind, content, user_action, created_at) VALUES (?, 'chat_op', ?, 'executed', ?)",
+            (today, json.dumps(
+                {"action": body.model_dump(), "pre_image": pre_image, "target_id": target_id},
+                ensure_ascii=False), now),
+        )
+        undo_id = cur.lastrowid
+    return {"ok": True, "undo_id": undo_id, "summary": body.summary}
+
+
+class UndoIn(BaseModel):
+    undo_id: int
+
+
+@router.post("/chat/undo")
+def undo_action(body: UndoIn):
+    """撤销已执行的操作卡（IDS 2.2：即时小事确认卡带撤销按钮）"""
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT content, user_action FROM agent_suggestions WHERE id = ?", (body.undo_id,)
+        ).fetchone()
+        if not row or row["user_action"] != "executed":
+            return {"ok": False, "error": "找不到可撤销的记录"}
+        try:
+            rec = json.loads(row["content"])
+        except json.JSONDecodeError:
+            return {"ok": False, "error": "记录损坏，无法撤销"}
+        action, pre_image, tid = rec.get("action", {}), rec.get("pre_image"), rec.get("target_id")
+        op = action.get("op")
+        if op == "create_task" and tid:
+            # 建了又撤：删掉（挂靠日志脱离，同 tasks 删除逻辑）
+            conn.execute("UPDATE progress_logs SET task_id = NULL WHERE task_id = ?", (tid,))
+            conn.execute("DELETE FROM tasks WHERE id = ?", (tid,))
+        elif op in ("update_task", "complete_task") and tid and pre_image:
+            sets = ", ".join(f"{k} = ?" for k in pre_image)
+            conn.execute(f"UPDATE tasks SET {sets} WHERE id = ?", (*pre_image.values(), tid))
+            if pre_image.get("status") in ("backlog", "active"):
+                conn.execute("UPDATE tasks SET completed_at = NULL WHERE id = ?", (tid,))
+        elif op == "create_reminder" and tid:
+            conn.execute("DELETE FROM reminders WHERE id = ?", (tid,))
+        else:
+            return {"ok": False, "error": "该操作不支持撤销"}
+        conn.execute(
+            "UPDATE agent_suggestions SET user_action = 'undone' WHERE id = ?", (body.undo_id,)
+        )
+    return {"ok": True}
 
 
 class ReviewIn(BaseModel):
@@ -277,6 +467,7 @@ def review(body: ReviewIn):
 
 class ProposalDecision(BaseModel):
     proposals: list[dict]  # 用户裁决通过的提案（含 kind/title/detail/target）
+    rejected: list[dict] = []  # 用户拒绝的提案（PRD 4.4：全量留痕可审计）
 
 
 def _write_core_section(title: str, detail: str) -> tuple[bool, str]:
@@ -437,4 +628,30 @@ def apply_proposals(body: ProposalDecision):
                 "INSERT INTO agent_suggestions (date, kind, content, user_action, created_at) VALUES (?, ?, ?, ?, ?)",
                 (today, "memory_sync", str(p), "accepted" if result.get("ok") else "failed", now),
             )
-    return {"applied": applied}
+        # 被拒提案留痕（PRD 4.4 / 风险对策：agent_suggestions 全量留痕，前端可审计）
+        for p in body.rejected:
+            conn.execute(
+                "INSERT INTO agent_suggestions (date, kind, content, user_action, created_at) VALUES (?, ?, ?, ?, ?)",
+                (today, "memory_sync", str(p), "rejected", now),
+            )
+
+        # 闪记闭环（FR-1.2）：本次入库提案覆盖到的闪记自动确认——处理完不用回闪记池手动丢
+        flash_closed = 0
+        corpus = "\n".join(
+            f"{p.get('evidence') or ''}\n{p.get('detail') or ''}\n{p.get('title') or ''}"
+            for p in body.proposals
+        )
+        if corpus.strip():
+            for it in conn.execute(
+                "SELECT id, content FROM inbox_items WHERE status = 'pending'"
+            ).fetchall():
+                key = it["content"].strip()
+                if len(key) > 40:
+                    key = key[:40]
+                if key and key in corpus:
+                    conn.execute(
+                        "UPDATE inbox_items SET status = 'confirmed', resolved_at = ? WHERE id = ?",
+                        (now, it["id"]),
+                    )
+                    flash_closed += 1
+    return {"applied": applied, "flash_closed": flash_closed}
