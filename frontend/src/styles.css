@@ -106,6 +106,31 @@ body {
 .small-btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
 .small-btn.wide { width: 100%; margin-top: 10px; }
 
+/* 流式输出光标 + 历史会话 */
+.stream-cursor { color: var(--accent); animation: blink 1s step-start infinite; }
+@keyframes blink { 50% { opacity: 0; } }
+
+.history-banner {
+  display: flex; align-items: center; justify-content: center; gap: 10px;
+  padding: 6px 10%; background: var(--side); border-top: 1px solid var(--border);
+  font-size: 13px; color: var(--accent-brown);
+}
+.history-wrap { position: relative; }
+.history-panel {
+  position: absolute; bottom: calc(100% + 8px); right: 0; width: 200px;
+  background: var(--card); border: 1px solid var(--border); border-radius: 8px;
+  box-shadow: 0 4px 14px rgba(0,0,0,.12); padding: 8px; z-index: 30;
+  max-height: 280px; overflow-y: auto;
+}
+.history-panel .empty { padding: 12px 0; font-size: 13px; }
+.history-item {
+  display: flex; justify-content: space-between; width: 100%;
+  padding: 7px 10px; border: none; background: transparent; border-radius: 6px;
+  cursor: pointer; font-size: 13px; color: var(--text); text-align: left;
+}
+.history-item:hover { background: rgba(0,0,0,.05); }
+.history-item.current { color: var(--accent); font-weight: 500; }
+
 /* 操作卡（对话驱动操作） */
 .action-stack { margin-top: 8px; display: flex; flex-direction: column; gap: 8px; }
 .action-card {

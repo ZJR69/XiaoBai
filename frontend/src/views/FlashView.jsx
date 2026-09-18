@@ -1,15 +1,32 @@
 import { useEffect, useState } from 'react'
 import { api } from '../api.js'
 
-// 闪记：哑捕获池。勾选若干条 → 召唤小白对话式处理（看懂就提案，看不懂就问）
+// 闪记：哑捕获池。输入框随手记 → 勾选若干条 → 召唤小白对话式处理（看懂就提案，看不懂就问）
 export default function FlashView({ refreshKey, refresh, startChatWith }) {
   const [items, setItems] = useState([])
   const [selected, setSelected] = useState(new Set())
+  const [text, setText] = useState('')
+  const [error, setError] = useState('')
 
   const load = async () => setItems(await api.listInbox())
   useEffect(() => {
     load().catch(console.error)
   }, [refreshKey])
+
+  const capture = async (e) => {
+    e.preventDefault()
+    const t = text.trim()
+    if (!t) return
+    setError('')
+    try {
+      await api.capture(t)
+      setText('')
+      await load()
+      refresh?.()
+    } catch (err) {
+      setError(err.message || '记下失败')
+    }
+  }
 
   const toggle = (id) =>
     setSelected((s) => {
@@ -36,8 +53,18 @@ export default function FlashView({ refreshKey, refresh, startChatWith }) {
     <div className="view">
       <h2>闪记</h2>
       <p className="hint">
-        Ctrl+Shift+X 随手记，不用分类，小白不会催你。想处理时勾几条，叫它过来一起过。
+        随手记，不用分类，小白不会催你。想处理时勾几条，叫它过来一起过。
       </p>
+
+      <form className="inline-form" onSubmit={capture}>
+        <input
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          placeholder="想到什么记什么，不用分类…（Enter 记下）"
+        />
+        <button type="submit">记下</button>
+      </form>
+      {error && <p className="form-error">{error}</p>}
 
       {selected.size > 0 && (
         <div className="flash-actions">

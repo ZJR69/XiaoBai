@@ -42,6 +42,34 @@ def chat_completion(messages: list[dict], temperature: float = 0.7) -> str:
     return resp.json()["choices"][0]["message"]["content"]
 
 
+def chat_completion_stream(messages: list[dict], temperature: float = 0.7):
+    """流式调用 DeepSeek chat API：逐段 yield 增量文本（SSE）。
+    与 chat_completion 同参，供 /api/chat/stream 使用。"""
+    import httpx
+
+    with httpx.stream(
+        "POST",
+        f"{BASE_URL}/chat/completions",
+        headers={"Authorization": f"Bearer {API_KEY}"},
+        json={"model": MODEL, "messages": messages, "temperature": temperature, "stream": True},
+        timeout=60,
+    ) as resp:
+        resp.raise_for_status()
+        for line in resp.iter_lines():
+            if not line.startswith("data: "):
+                continue
+            data = line[len("data: "):]
+            if data.strip() == "[DONE]":
+                break
+            try:
+                chunk = json.loads(data)
+            except json.JSONDecodeError:
+                continue
+            delta = chunk.get("choices", [{}])[0].get("delta", {}).get("content")
+            if delta:
+                yield delta
+
+
 def extract_json(text: str) -> dict | list | None:
     """从 LLM 回复中提取 JSON（容忍 ```json 包裹）"""
     text = text.strip()

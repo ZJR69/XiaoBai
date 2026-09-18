@@ -294,6 +294,69 @@ def chat_history(date: str | None = None):
     return {"date": day, "messages": [dict(r) for r in rows]}
 
 
+@router.get("/chat/dates")
+def chat_dates():
+    """历史会话日期列表（最近 30 天有记录的），供前端「历史」下拉选择。"""
+    with get_conn() as conn:
+        rows = conn.execute(
+            """SELECT session_date, COUNT(*) AS n FROM chat_messages
+               GROUP BY session_date ORDER BY session_date DESC LIMIT 30"""
+        ).fetchall()
+    return {"dates": [dict(r) for r in rows]}
+
+
+@router.post("/chat/stream")
+def chat_stream(body: ChatIn):
+    """流式对话（SSE）：增量推 delta，结束时推 {done, reply, actions}。
+    持久化与操作块剥离逻辑与 /api/chat 完全一致。"""
+    from fastapi.responses import StreamingResponse
+
+    now = datetime.now().isoformat(timespec="seconds")
+    today = now[:10]
+
+    def _sse(payload: dict) -> str:
+        return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+    def gen():
+        with get_conn() as conn:
+            conn.execute(
+                "INSERT INTO chat_messages (session_date, role, content, created_at) VALUES (?, 'user', ?, ?)",
+                (today, body.message, now),
+            )
+        full = ""
+        if not llm.llm_available():
+            full = "我还没有接入大模型。请在 backend/.env 里配置 DEEPSEEK_API_KEY（参考 .env.example），配置后重启后端，我就能带着你的项目记忆和你对话了。"
+            yield _sse({"delta": full})
+        else:
+            context = _build_context()
+            extra = _expand_mentions(body.message)
+            if extra:
+                context += "\n\n【相关详情（因为你提到了它，自动展开）】\n" + extra
+            messages = [
+                {"role": "system", "content": SYSTEM_PROMPT + "\n\n" + context},
+                *body.history[-20:],
+                {"role": "user", "content": body.message},
+            ]
+            try:
+                for delta in llm.chat_completion_stream(messages):
+                    full += delta
+                    yield _sse({"delta": delta})
+            except Exception as e:  # 中途失败：已流出的部分保留，补上错误说明
+                full += f"\n（调用大模型失败：{e}。请检查 API key 和网络。）"
+                yield _sse({"delta": f"\n（调用大模型失败：{e}。请检查 API key 和网络。）"})
+
+        reply, actions = _extract_actions(full)
+        with get_conn() as conn:
+            conn.execute(
+                "INSERT INTO chat_messages (session_date, role, content, created_at) VALUES (?, 'assistant', ?, ?)",
+                (today, reply, now),
+            )
+        yield _sse({"done": True, "reply": reply, "actions": actions})
+
+    return StreamingResponse(gen(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
 # ── 对话驱动操作（IDS 1.1/2.4：操作指令 → 确认卡 → 执行/撤销）──
 
 TASK_STATUSES = ("backlog", "active", "done", "cancelled")
