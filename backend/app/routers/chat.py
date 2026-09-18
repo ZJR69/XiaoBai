@@ -41,7 +41,7 @@ def _build_context() -> str:
             proj = f"（{t['project']}）" if t["project"] else ""
             lines.append(f"- {t['title']}{proj} [{t['status']}]{due}")
     if inbox["n"]:
-        lines.append(f"收件箱有 {inbox['n']} 条待处理")
+        lines.append(f"闪记池有 {inbox['n']} 条待处理")
     return "\n".join(lines)
 
 
@@ -55,7 +55,8 @@ SYSTEM_PROMPT = """你是「小白」，用户的个人管理智能体，常驻�
 
 约束：
 - 只引用下方【当前状态】里真实存在的条目，不要编造不存在的任务或项目
-- 回复简洁，说重点，必要时用短列表"""
+- 回复简洁，说重点，必要时用短列表
+- 用户说「处理这几条闪记」时：逐条理解，看懂的就提议去向（建任务/知识/丢弃，给出建议的标题、日期、归属），看不懂或有歧义就先问清楚再动手；永远等用户确认"""
 
 
 class ChatIn(BaseModel):
