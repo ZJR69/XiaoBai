@@ -235,3 +235,28 @@ body {
   border-radius: 10px; background: var(--panel); outline: none;
   box-shadow: 0 8px 30px rgba(0,0,0,.15);
 }
+
+/* 原料区 */
+.dropzone-path {
+  display: block; margin: 8px 0; padding: 6px 10px; background: var(--side);
+  border-radius: 6px; font-size: 12px; font-family: Consolas, monospace; word-break: break-all;
+}
+.digesting {
+  padding: 14px; background: #efe9da; color: var(--accent-brown); border-radius: 8px;
+  margin-bottom: 14px; font-size: 14px;
+}
+.digest-results { margin-bottom: 16px; font-size: 13px; }
+.digest-ok { color: var(--accent); padding: 3px 0; }
+.digest-fail { color: var(--danger); padding: 3px 0; }
+.sub-tabs { display: flex; gap: 4px; margin-bottom: 14px; border-bottom: 1px solid var(--border); }
+.sub-tab {
+  padding: 8px 16px; border: none; background: transparent; cursor: pointer;
+  font-size: 14px; color: var(--muted); border-bottom: 2px solid transparent;
+}
+.sub-tab.active { color: var(--text); border-bottom-color: var(--accent); font-weight: 500; }
+
+/* 侧栏监听提示 */
+.watch-tip {
+  padding: 10px 12px; background: #efe9da; border-radius: 8px; font-size: 13px;
+  color: var(--accent-brown); cursor: pointer; margin-bottom: 10px; line-height: 1.4;
+}

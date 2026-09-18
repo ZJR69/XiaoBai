@@ -135,9 +135,17 @@ class ProposalDecision(BaseModel):
 
 @router.post("/proposals/apply")
 def apply_proposals(body: ProposalDecision):
-    """裁决通过的提案执行入库。M2 先支持 task 类；knowledge 类走消化引擎（后续）。"""
+    """裁决通过的提案执行入库。task 建任务；knowledge 写入 wiki（sources 下对话沉淀页）。"""
+    import re
+    from pathlib import Path
+
+    from app.routers.raw import _append_log, _update_index
+
     applied = []
     now = datetime.now().isoformat(timespec="seconds")
+    today = now[:10]
+    wiki_dir = Path(__file__).resolve().parents[3] / "storage" / "wiki"
+
     with get_conn() as conn:
         for p in body.proposals:
             if p.get("kind") == "task":
@@ -146,8 +154,25 @@ def apply_proposals(body: ProposalDecision):
                     (p.get("title") or p.get("detail", "")[:100], now),
                 )
                 applied.append({"kind": "task", "title": p.get("title")})
+            elif p.get("kind") == "knowledge":
+                title = (p.get("title") or "未命名知识条目").strip()
+                slug = re.sub(r'[\\/:*?"<>|\s]+', "-", title)[:60]
+                page_rel = f"sources/{slug}.md"
+                page = wiki_dir / page_rel
+                front = (
+                    f"---\ntype: source\ncreated: {today}\nupdated: {today}\n"
+                    f"source: conversation\n---\n\n"
+                )
+                body_text = f"# {title}\n\n{p.get('detail', '')}\n"
+                if p.get("evidence"):
+                    body_text += f"\n> 来源对话：{p['evidence']}\n"
+                page.parent.mkdir(parents=True, exist_ok=True)
+                page.write_text(front + body_text, encoding="utf-8")
+                _update_index(page_rel, title)
+                _append_log(f"## [{today}] ingest | 对话沉淀：{title}")
+                applied.append({"kind": "knowledge", "title": title, "page": page_rel})
             conn.execute(
                 "INSERT INTO agent_suggestions (date, kind, content, user_action, created_at) VALUES (?, ?, ?, 'accepted', ?)",
-                (now[:10], "memory_sync", str(p), now),
+                (today, "memory_sync", str(p), now),
             )
     return {"applied": applied}

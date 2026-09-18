@@ -49,6 +49,12 @@ export const api = {
   archiveWikiPage: (path) =>
     request('/api/wiki/archive', { method: 'POST', body: JSON.stringify({ path }) }),
 
+  // 投放区（原料）
+  scanDropzone: () => request('/api/raw/scan'),
+  digestFiles: (paths) =>
+    request('/api/raw/digest', { method: 'POST', body: JSON.stringify({ paths }) }),
+  rawEvents: (since) => request(`/api/raw/events?since=${since}`),
+
   // 生活角
   listReminders: () => request('/api/reminders'),
   createReminder: (r) =>

@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { api } from '../api.js'
+import RawView from './RawView.jsx'
 
 const STATUS_META = {
   clean: { label: '已归档', cls: 'st-clean' },
@@ -8,6 +9,7 @@ const STATUS_META = {
 }
 
 export default function KnowledgeView({ refreshKey }) {
+  const [tab, setTab] = useState('wiki') // wiki | raw
   const [pages, setPages] = useState([])
   const [reading, setReading] = useState(null)
 
@@ -15,6 +17,10 @@ export default function KnowledgeView({ refreshKey }) {
   useEffect(() => {
     load().catch(console.error)
   }, [refreshKey])
+
+  if (tab === 'raw') {
+    return <RawView refreshKey={refreshKey} onChanged={load} />
+  }
 
   const open = async (p) => {
     const res = await api.readWikiPage(p.path)
@@ -29,7 +35,14 @@ export default function KnowledgeView({ refreshKey }) {
 
   return (
     <div className="view">
-      <h2>知识库</h2>
+      <div className="sub-tabs">
+        <button className={tab === 'wiki' ? 'sub-tab active' : 'sub-tab'} onClick={() => setTab('wiki')}>
+          知识页
+        </button>
+        <button className={tab === 'raw' ? 'sub-tab active' : 'sub-tab'} onClick={() => setTab('raw')}>
+          原料区
+        </button>
+      </div>
       <p className="hint">
         状态标注：未归档（新内容）→ 你修改后变为 有修改 → 点「归档」整理入库（Git 式工作流）。
       </p>

@@ -65,6 +65,42 @@ function FlashPopup({ onCaptured }) {
   )
 }
 
+// dropzone 变更监听提示：轮询后端事件（watchdog 检测到新文件时显示）
+function WatchTip({ onGoRaw }) {
+  const [since, setSince] = useState(null)
+  const [count, setCount] = useState(0)
+
+  useEffect(() => {
+    let timer
+    const poll = async () => {
+      try {
+        const res = await api.rawEvents(since ?? 0)
+        if (since === null) {
+          // 首次：建立基线，不提示历史事件
+          setSince(res.now)
+        } else if (res.count > 0) {
+          setCount(res.count)
+          setSince(res.now)
+        }
+      } catch {
+        /* 后端未启动时静默 */
+      }
+    }
+    poll()
+    timer = setInterval(poll, 15000)
+    return () => clearInterval(timer)
+  }, [since])
+
+  if (count === 0) return null
+  return (
+    <div className="watch-tip" onClick={onGoRaw} title="点击去原料区处理">
+      投放区有动静（{count} 个事件）
+      <br />
+      要消化吗？
+    </div>
+  )
+}
+
 export default function App() {
   const [view, setView] = useState('chat')
   const [status, setStatus] = useState({ openTasks: 0, inbox: 0, reminders: 0 })
@@ -103,6 +139,7 @@ export default function App() {
           ))}
         </nav>
         <div className="sidebar-status">
+          <WatchTip onGoRaw={() => setView('knowledge')} />
           <div>待办 {status.openTasks}</div>
           <div>闪记 {status.inbox}</div>
           <div>提醒 {status.reminders}</div>
