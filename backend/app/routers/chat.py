@@ -1,9 +1,9 @@
 """对话流：小白的对话主界面后端。
 
-核心价值（PRD P2 / 交互设计文档 1.1）：
-- 小白拥有用户全部项目记忆，对话零同步成本
-- 对话中实体锚定（防幻觉）：回复中项目名等关联真实库条目
-- 「回顾对话」→ 批量提案，所有入库经用户裁决（防污染铁律）
+核心价值（PRD P2 / 交互设计文档 1.1 / PRD 4.6 记忆分层）：
+- 三层记忆注入：core.md 底座全文 + 进行中的事索引 + 实体索引（对标 Claude Code / ChatGPT）
+- 关键词触发：消息提到某项目/人物名 → 自动附加其详情（进展日志/实体页）
+- 「回顾对话」→ 批量提案（含去向 task/update/knowledge/core/entity），所有入库经用户裁决（防污染铁律）
 """
 import re
 from datetime import datetime
@@ -19,14 +19,62 @@ router = APIRouter(prefix="/api", tags=["chat"])
 
 # backend/app/routers/chat.py → storage/wiki
 WIKI_DIR = Path(__file__).resolve().parents[3] / "storage" / "wiki"
+CORE_MD = WIKI_DIR / "core.md"
+ENTITIES_DIR = WIKI_DIR / "entities"
+
+CATEGORY_LABELS = {
+    "research": "科研", "collaboration": "合作", "family": "家庭",
+    "personal": "个人", "club": "社团", "other": "其他",
+}
+
+
+def _page_title(path: Path, default: str) -> str:
+    """读 markdown 首个 # 标题，失败用默认名"""
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if line.startswith("# "):
+                return line[2:].strip()
+    except OSError:
+        pass
+    return default
+
+
+def _ongoing_lines(conn) -> list[str]:
+    """进行中的事索引：每件一行（名称 + 类别 + 下一步 + 最近动态），封顶 30 条（PRD 4.6）"""
+    rows = conn.execute(
+        """SELECT p.id, p.name, p.category,
+                  (SELECT content FROM progress_logs WHERE project_id = p.id AND kind = 'next_step' ORDER BY id DESC LIMIT 1) AS next_step,
+                  (SELECT kind || '：' || substr(content, 1, 60) FROM progress_logs WHERE project_id = p.id ORDER BY id DESC LIMIT 1) AS last_activity
+           FROM projects p WHERE p.status != 'closed' ORDER BY p.id DESC LIMIT 30"""
+    ).fetchall()
+    return [
+        f"- {r['name']}（{CATEGORY_LABELS.get(r['category'], '其他')}）"
+        + (f" 下一步：{r['next_step'][:60]}" if r["next_step"] else "")
+        + (f"｜最近：{r['last_activity']}" if r["last_activity"] else "")
+        for r in rows
+    ]
+
+
+def _entity_lines() -> list[str]:
+    """实体索引：每条一行（名字 + 一句话描述），Claude Code MEMORY.md 同款模式"""
+    lines = []
+    if ENTITIES_DIR.exists():
+        for f in sorted(ENTITIES_DIR.glob("*.md")):
+            title = _page_title(f, f.stem)
+            # 正文第一句作为描述
+            desc = ""
+            for line in f.read_text(encoding="utf-8").splitlines():
+                s = line.strip()
+                if s and not s.startswith(("#", "-", "---", ">")) and not s.startswith("type:") and ":" not in s[:12]:
+                    desc = s.lstrip("- ").strip()
+                    break
+            lines.append(f"- {title}：{desc[:80]}" if desc else f"- {title}")
+    return lines
 
 
 def _build_context() -> str:
-    """从库中提取用户当前全局状态，注入 system prompt（小白的记忆）"""
+    """三层记忆注入（PRD 4.6）：core 全文 + 事务索引 + 实体索引 + 知识库目录"""
     with get_conn() as conn:
-        projects = conn.execute(
-            "SELECT id, name, status FROM projects WHERE status = 'active'"
-        ).fetchall()
         tasks = conn.execute(
             """SELECT t.title, t.status, t.due_at, p.name AS project
                FROM tasks t LEFT JOIN projects p ON t.project_id = p.id
@@ -38,16 +86,36 @@ def _build_context() -> str:
         reminders = conn.execute(
             "SELECT title FROM reminders WHERE active = 1 ORDER BY id"
         ).fetchall()
+        ongoing = _ongoing_lines(conn)
 
     lines = ["【用户的当前状态（小白的后台记忆，真实数据）】"]
-    if projects:
-        lines.append("进行中的项目：" + "、".join(p["name"] for p in projects))
+
+    # 第一层：core.md 底座全文
+    if CORE_MD.exists():
+        core = CORE_MD.read_text(encoding="utf-8").strip()
+        if core:
+            lines.append("【核心档案（底座记忆，core.md 全文）】")
+            lines.append(core)
+
+    # 第二层：进行中的事索引
+    if ongoing:
+        lines.append("进行中的事（详情可查，需要时问小白）：")
+        lines += ongoing
+
+    # 任务（带截止）
     if tasks:
         lines.append("未完成任务：")
         for t in tasks:
             due = f"，截止 {t['due_at'][:10]}" if t["due_at"] else ""
             proj = f"（{t['project']}）" if t["project"] else ""
             lines.append(f"- {t['title']}{proj} [{t['status']}]{due}")
+
+    # 第三层：实体索引
+    entities = _entity_lines()
+    if entities:
+        lines.append("人物/机构（提到名字时小白知道去哪找详情）：")
+        lines += entities
+
     if reminders:
         lines.append("生活提醒：" + "、".join(r["title"] for r in reminders))
     if inbox["n"]:
@@ -64,6 +132,36 @@ def _build_context() -> str:
             lines.append("知识库目录（用户已消化的知识，涉及相关知识时优先引用这些条目）：")
             lines += entries[:50]
     return "\n".join(lines)
+
+
+def _expand_mentions(message: str) -> str:
+    """关键词触发（PRD 4.6 注入层第 5 条）：消息提到项目/人物名 → 附加其详情。
+    Claude Code 同款精确关键词匹配，无需向量库。"""
+    if not message:
+        return ""
+    extras = []
+    with get_conn() as conn:
+        projects = conn.execute(
+            "SELECT id, name FROM projects WHERE status != 'closed'"
+        ).fetchall()
+        for p in projects:
+            if p["name"] and p["name"] in message:
+                logs = conn.execute(
+                    "SELECT kind, content, created_at FROM progress_logs WHERE project_id = ? ORDER BY id DESC LIMIT 5",
+                    (p["id"],),
+                ).fetchall()
+                if logs:
+                    body = "\n".join(
+                        f"- [{lg['kind']}] {lg['content']}（{lg['created_at'][:10]}）"
+                        for lg in reversed(logs)
+                    )
+                    extras.append(f"### 项目《{p['name']}》最近进展\n{body}")
+    if ENTITIES_DIR.exists():
+        for f in sorted(ENTITIES_DIR.glob("*.md")):
+            title = _page_title(f, f.stem)
+            if title and title in message:
+                extras.append(f"### 实体页《{title}》\n{f.read_text(encoding='utf-8')[:3000]}")
+    return "\n\n".join(extras)
 
 
 SYSTEM_PROMPT = """你是「小白」，用户的个人管理智能体，常驻在用户电脑上。
@@ -100,8 +198,12 @@ def chat(body: ChatIn):
     if not llm.llm_available():
         reply = "我还没有接入大模型。请在 backend/.env 里配置 DEEPSEEK_API_KEY（参考 .env.example），配置后重启后端，我就能带着你的项目记忆和你对话了。"
     else:
+        context = _build_context()
+        extra = _expand_mentions(body.message)
+        if extra:
+            context += "\n\n【相关详情（因为你提到了它，自动展开）】\n" + extra
         messages = [
-            {"role": "system", "content": SYSTEM_PROMPT + "\n\n" + _build_context()},
+            {"role": "system", "content": SYSTEM_PROMPT + "\n\n" + context},
             *body.history[-20:],  # 最近 20 条防超长
             {"role": "user", "content": body.message},
         ]
@@ -144,9 +246,19 @@ def review(body: ReviewIn):
         f"{'用户' if m['role'] == 'user' else '小白'}：{m['content']}" for m in body.messages
     )
     prompt = f"""回顾以下对话，提取值得入库的共识。返回 JSON 数组，每项：
-{{"kind": "task|knowledge|update", "title": "简短标题", "detail": "具体内容",
-  "target": "仅 update 需要：要更新的任务或项目的准确名称（从对话或当前状态中找）",
-  "evidence": "来源对话摘录", "action": "新增任务|新增知识条目|更新现有条目"}}
+{{"kind": "task|knowledge|update|core|entity", "title": "简短标题（core 为小节名，entity 为人物/机构名）",
+  "detail": "具体内容",
+  "target": "仅 update 需要：要更新的任务或项目的准确名称（从对话中找）",
+  "evidence": "来源对话摘录",
+  "action": "新增任务|新增知识|更新现有条目|写入核心档案|新增人物/机构页"}}
+
+去向判断：
+- 用户的底座信息（组织性质、战略定位、关键人物名单、长期方向、我是谁）→ core
+- 具体某个人物/机构的细节（风格、诉求、关系）→ entity
+- 一次性待办 → task
+- 可消化的知识点 → knowledge
+- 对既有任务/项目的进展更新 → update（target 填名称）
+
 只提取真实形成共识的内容，宁缺毋滥。没有就返回 []。
 
 对话：
@@ -164,7 +276,47 @@ def review(body: ReviewIn):
 
 
 class ProposalDecision(BaseModel):
-    proposals: list[dict]  # 用户裁决通过的提案（含 kind/title/detail）
+    proposals: list[dict]  # 用户裁决通过的提案（含 kind/title/detail/target）
+
+
+def _write_core_section(title: str, detail: str) -> tuple[bool, str]:
+    """写 core.md 底座记忆：同名小节覆盖（更新即覆盖，历史在 log），新小节追加。"""
+    CORE_MD.parent.mkdir(parents=True, exist_ok=True)
+    if not CORE_MD.exists():
+        CORE_MD.write_text(
+            "# 核心档案\n\n> 底座记忆：保持精炼，详见 schema.md。\n", encoding="utf-8"
+        )
+    content = CORE_MD.read_text(encoding="utf-8")
+    section = f"## {title}\n\n{detail.strip()}\n"
+    pattern = re.compile(rf"^## {re.escape(title)}[ \t]*\n(?:(?!^## ).*\n?)*", re.MULTILINE)
+    if pattern.search(content):
+        content = pattern.sub(section, content)
+        note = "小节已存在，已覆盖更新"
+    else:
+        content = content.rstrip() + "\n\n" + section
+        note = "新增小节"
+    CORE_MD.write_text(content, encoding="utf-8")
+    return True, note
+
+
+def _write_entity_page(title: str, detail: str, today: str) -> tuple[bool, str]:
+    """写 entities/ 实体页：已存在则追加更新记录，不存在则新建。"""
+    slug = re.sub(r'[\\/:*?"<>|\s]+', "-", title)[:60]
+    page_rel = f"entities/{slug}.md"
+    page = WIKI_DIR / page_rel
+    page.parent.mkdir(parents=True, exist_ok=True)
+    if page.exists():
+        old = page.read_text(encoding="utf-8")
+        # 更新 frontmatter 的 updated + 追加更新记录
+        old = re.sub(r"^updated: .*$", f"updated: {today}", old, count=1, flags=re.MULTILINE)
+        content = old.rstrip() + f"\n\n## 更新 {today}\n\n{detail.strip()}\n"
+        note = "实体页已存在，追加更新"
+    else:
+        front = f"---\ntype: entity\ncreated: {today}\nupdated: {today}\n---\n\n"
+        content = front + f"# {title}\n\n{detail.strip()}\n"
+        note = "新建实体页"
+    page.write_text(content, encoding="utf-8")
+    return True, note
 
 
 @router.post("/proposals/apply")
@@ -217,6 +369,19 @@ def apply_proposals(body: ProposalDecision):
                 _update_index(page_rel, title)
                 _append_log(f"## [{today}] ingest | 对话沉淀：{title}")
                 result = {"kind": "knowledge", "title": title, "page": page_rel, "ok": True}
+            elif p.get("kind") == "core":
+                title = (p.get("title") or "杂项").strip()
+                ok, note = _write_core_section(title, p.get("detail", ""))
+                _append_log(f"## [{today}] core | {title}")
+                result = {"kind": "core", "title": title, "ok": ok, "note": note}
+            elif p.get("kind") == "entity":
+                title = (p.get("title") or "未命名实体").strip()
+                ok, note = _write_entity_page(title, p.get("detail", ""), today)
+                slug = re.sub(r'[\\/:*?"<>|\s]+', "-", title)[:60]
+                page_rel = f"entities/{slug}.md"
+                _update_index(page_rel, title, section="entities")
+                _append_log(f"## [{today}] entity | {title}")
+                result = {"kind": "entity", "title": title, "ok": ok, "note": note, "page": page_rel}
             elif p.get("kind") == "update":
                 target = (p.get("target") or p.get("title") or "").strip()
                 detail = p.get("detail", "")

@@ -12,6 +12,7 @@ CREATE TABLE IF NOT EXISTS projects (
   id INTEGER PRIMARY KEY,
   name TEXT NOT NULL,
   description TEXT,
+  category TEXT DEFAULT 'other',
   status TEXT DEFAULT 'active',
   created_at TEXT,
   closed_at TEXT
@@ -133,6 +134,11 @@ def init_db() -> None:
     conn = get_conn()
     try:
         conn.executescript(DDL)
+        # 轻量迁移：给已存在的库补列（列已存在时静默跳过）
+        try:
+            conn.execute("ALTER TABLE projects ADD COLUMN category TEXT")
+        except sqlite3.OperationalError:
+            pass
         conn.commit()
     finally:
         conn.close()

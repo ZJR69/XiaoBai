@@ -10,10 +10,14 @@ router = APIRouter(prefix="/api/projects", tags=["projects"])
 
 LOG_KINDS = ("background", "decision", "status", "next_step", "note")
 
+# PRD 4.6：projects 语义升级为「进行中的事」
+CATEGORIES = ("research", "collaboration", "family", "personal", "club", "other")
+
 
 class ProjectIn(BaseModel):
     name: str
     description: str | None = None
+    category: str = "other"  # research/collaboration/family/personal/club/other
 
 
 class LogIn(BaseModel):
@@ -52,13 +56,15 @@ def list_projects():
 
 @router.post("", status_code=201)
 def create_project(p: ProjectIn):
+    if p.category not in CATEGORIES:
+        raise HTTPException(400, f"category 必须是 {CATEGORIES} 之一")
     now = datetime.now().isoformat(timespec="seconds")
     with get_conn() as conn:
         cur = conn.execute(
-            "INSERT INTO projects (name, description, created_at) VALUES (?, ?, ?)",
-            (p.name.strip(), p.description, now),
+            "INSERT INTO projects (name, description, category, created_at) VALUES (?, ?, ?, ?)",
+            (p.name.strip(), p.description, p.category, now),
         )
-        return {"id": cur.lastrowid, "name": p.name}
+        return {"id": cur.lastrowid, "name": p.name, "category": p.category}
 
 
 @router.post("/{project_id}/logs", status_code=201)

@@ -188,21 +188,32 @@ def _register(rel: str, p: Path, h: str, page: str | None, now: str):
         )
 
 
-def _update_index(page_rel: str, name: str):
-    """index.md 的 sources 节追加条目（若不存在）。"""
+INDEX_SECTIONS = {
+    "sources": "## sources（原始资料摘要）",
+    "entities": "## entities（实体：人物/组织/课程/项目）",
+    "topics": "## topics（主题/概念）",
+}
+
+
+def _update_index(page_rel: str, name: str, section: str = "sources"):
+    """index.md 指定节追加条目（若不存在）。节缺失时在文件末尾补建该节。"""
     idx = DROPZONE.parent.parent / "wiki" / "index.md"
+    if not idx.exists():
+        return
     content = idx.read_text(encoding="utf-8")
-    if page_rel not in content:
-        content = content.replace(
-            "## sources（原始资料摘要）\n（暂无）",
-            "## sources（原始资料摘要）",
-        )
-        if "## sources（原始资料摘要）" in content:
-            content = content.replace(
-                "## sources（原始资料摘要）\n",
-                f"## sources（原始资料摘要）\n- [{name}]({page_rel})\n",
-            )
-        idx.write_text(content, encoding="utf-8")
+    if page_rel in content:
+        return
+    heading = INDEX_SECTIONS.get(section)
+    if not heading:
+        return
+    if heading not in content:
+        # 节缺失：末尾补建（不静默丢条目）
+        content = content.rstrip() + f"\n\n{heading}\n- [{name}]({page_rel})\n"
+    else:
+        # 清掉「（暂无）」占位
+        content = content.replace(f"{heading}\n（暂无）", heading)
+        content = content.replace(f"{heading}\n", f"{heading}\n- [{name}]({page_rel})\n", 1)
+    idx.write_text(content, encoding="utf-8")
 
 
 def _append_log(line: str):
