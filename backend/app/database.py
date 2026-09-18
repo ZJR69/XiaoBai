@@ -107,6 +107,17 @@ CREATE TABLE IF NOT EXISTS chat_messages (
   content TEXT NOT NULL,
   created_at TEXT
 );
+
+-- 投放区文件（dropzone 扫描登记 + 消化状态）
+CREATE TABLE IF NOT EXISTS raw_files (
+  path TEXT PRIMARY KEY,             -- 相对 dropzone 的路径
+  size INTEGER,
+  archived_hash TEXT,                -- 消化时的哈希（对比判断 modified）
+  status TEXT DEFAULT 'untracked',   -- untracked/digested
+  source_page TEXT,                  -- 消化后生成的 wiki 摘要页路径
+  first_seen_at TEXT,
+  digested_at TEXT
+);
 """
 
 

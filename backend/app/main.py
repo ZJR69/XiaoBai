@@ -5,7 +5,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.database import init_db
-from app.routers import capture, chat, inbox, projects, reminders, tasks, wiki
+from app.routers import capture, chat, inbox, projects, raw, reminders, tasks, watch, wiki
 
 
 @asynccontextmanager
@@ -31,6 +31,8 @@ app.include_router(projects.router)
 app.include_router(wiki.router)
 app.include_router(reminders.router)
 app.include_router(chat.router)
+app.include_router(raw.router)
+app.include_router(watch.router)
 
 
 @app.get("/api/health")
