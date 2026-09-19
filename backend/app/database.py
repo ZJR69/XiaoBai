@@ -63,6 +63,20 @@ CREATE TABLE IF NOT EXISTS schedule_slots (
   valid_to TEXT
 );
 
+-- 一次性日程（日程的默认形态：调课/牙医/临时会议；周期性课程与固定组会才在 schedule_slots）
+CREATE TABLE IF NOT EXISTS schedule_events (
+  id INTEGER PRIMARY KEY,
+  title TEXT NOT NULL,
+  entry_type TEXT DEFAULT 'personal',
+  date TEXT NOT NULL,              -- YYYY-MM-DD（唯一定位维度，一次性）
+  start_time TEXT,
+  end_time TEXT,
+  location TEXT,
+  note TEXT,
+  created_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_events_date ON schedule_events(date);
+
 CREATE TABLE IF NOT EXISTS reminders (
   id INTEGER PRIMARY KEY,
   title TEXT NOT NULL,

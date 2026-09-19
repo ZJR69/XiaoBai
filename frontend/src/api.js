@@ -28,14 +28,22 @@ export const api = {
   deleteTask: (id) => request(`/api/tasks/${id}`, { method: 'DELETE' }),
 
   // 项目
-  listProjects: () => request('/api/projects'),
+  listProjects: (includeClosed) =>
+    request(`/api/projects${includeClosed ? '?include_closed=true' : ''}`),
   createProject: (p) =>
     request('/api/projects', { method: 'POST', body: JSON.stringify(p) }),
+  updateProject: (id, patch) =>
+    request(`/api/projects/${id}`, { method: 'PATCH', body: JSON.stringify(patch) }),
   addLog: (projectId, kind, content) =>
     request(`/api/projects/${projectId}/logs`, {
       method: 'POST',
       body: JSON.stringify({ kind, content }),
     }),
+  listLogs: (projectId) => request(`/api/projects/${projectId}/logs`),
+  updateLog: (projectId, logId, patch) =>
+    request(`/api/projects/${projectId}/logs/${logId}`, { method: 'PATCH', body: JSON.stringify(patch) }),
+  deleteLog: (projectId, logId) =>
+    request(`/api/projects/${projectId}/logs/${logId}`, { method: 'DELETE' }),
   contextPack: (projectId) => request(`/api/projects/${projectId}/context-pack`),
 
   // 知识库
@@ -117,11 +125,21 @@ export const api = {
   // 日程表（M4）
   listSchedule: () => request('/api/schedule'),
   todaySchedule: () => request('/api/schedule/today'),
+  weekSchedule: (start) => request(`/api/schedule/week${start ? `?start=${start}` : ''}`),
   createSlot: (s) =>
     request('/api/schedule', { method: 'POST', body: JSON.stringify(s) }),
   updateSlot: (id, patch) =>
     request(`/api/schedule/${id}`, { method: 'PATCH', body: JSON.stringify(patch) }),
   deleteSlot: (id) => request(`/api/schedule/${id}`, { method: 'DELETE' }),
+
+  // 一次性日程（日程的默认形态；周期性课程/固定组会才用上面的 slots）
+  listEvents: (start, end) =>
+    request(`/api/schedule/events${start || end ? `?${start ? `start=${start}` : ''}${start && end ? '&' : ''}${end ? `end=${end}` : ''}` : ''}`),
+  createEvent: (e) =>
+    request('/api/schedule/events', { method: 'POST', body: JSON.stringify(e) }),
+  updateEvent: (id, patch) =>
+    request(`/api/schedule/events/${id}`, { method: 'PATCH', body: JSON.stringify(patch) }),
+  deleteEvent: (id) => request(`/api/schedule/events/${id}`, { method: 'DELETE' }),
 
   // 通知（M4/M6 调度器）
   listNotifications: () => request('/api/notifications'),

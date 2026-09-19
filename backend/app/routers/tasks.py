@@ -63,7 +63,11 @@ def update_task(task_id: int, patch: TaskPatch):
         updates, params = [], []
         for field in ("title", "status", "priority", "due_at", "project_id"):
             val = getattr(patch, field)
-            if val is not None:
+            if field == "project_id" and "project_id" in patch.model_fields_set:
+                # 显式传入（含 null=取消挂靠）就生效
+                updates.append("project_id = ?")
+                params.append(val)
+            elif val is not None:
                 if field == "status" and val not in STATUSES:
                     raise HTTPException(400, f"status 必须是 {STATUSES} 之一")
                 updates.append(f"{field} = ?")
