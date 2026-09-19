@@ -15,6 +15,8 @@ export default function ChatView({ refresh, initialMessage, onSeedConsumed, noti
   const [sessions, setSessions] = useState([]) // 会话列表（最近活跃在前）
   const [activeSession, setActiveSession] = useState(null) // 当前会话 id（null = 新对话，首条消息时后端建）
   const [sessionOpen, setSessionOpen] = useState(false) // 左侧会话面板开关
+  const [mention, setMention] = useState(null) // 「#」引用中：{query, start}
+  const [mentionIdx, setMentionIdx] = useState(0)
   const bottomRef = useRef(null)
   const historyLoaded = useRef(false)
 
@@ -367,7 +369,47 @@ export default function ChatView({ refresh, initialMessage, onSeedConsumed, noti
     e.preventDefault()
     const text = input
     setInput('')
+    setMention(null)
     sendText(text)
+  }
+
+  // ── 「#」引用真实条目（实体索引，防幻觉）：输入 #关键字 弹真实库条目，选中替换为精确名称 ──
+  const onInputChange = (e) => {
+    setInput(e.target.value)
+    const pos = e.target.selectionStart
+    const m = e.target.value.slice(0, pos).match(/#[^\s#]*$/)
+    setMention(m ? { query: m[0].slice(1), start: pos - m[0].length } : null)
+    setMentionIdx(0)
+  }
+
+  const mentionRank = (a) => (a.kind === 'project' ? 0 : 1) // 进行中的事排前
+  const mentionOptions = mention
+    ? anchors
+        .filter((a) => a.name.toLowerCase().includes(mention.query.toLowerCase()))
+        .sort((a, b) => mentionRank(a) - mentionRank(b))
+        .slice(0, 8)
+    : []
+
+  const pickMention = (a) => {
+    const end = mention.start + 1 + mention.query.length
+    setInput(input.slice(0, mention.start) + a.name + ' ' + input.slice(end))
+    setMention(null)
+  }
+
+  const onInputKey = (e) => {
+    if (!mention || mentionOptions.length === 0) return
+    if (e.key === 'ArrowDown') {
+      e.preventDefault()
+      setMentionIdx((i) => (i + 1) % mentionOptions.length)
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault()
+      setMentionIdx((i) => (i - 1 + mentionOptions.length) % mentionOptions.length)
+    } else if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault()
+      pickMention(mentionOptions[mentionIdx])
+    } else if (e.key === 'Escape') {
+      setMention(null)
+    }
   }
 
   // 回顾对话 → 批量提案（防污染：对话中绝不打断，按需回顾）
@@ -488,9 +530,7 @@ export default function ChatView({ refresh, initialMessage, onSeedConsumed, noti
               )}
             </div>
             <div className="bubble-content">
-              {m.role === 'user'
-                ? m.content
-                : renderAnchored(m._streaming ? m.content.split('<<<ACTION>>>')[0] : m.content)}
+              {renderAnchored(m._streaming ? m.content.split('<<<ACTION>>>')[0] : m.content)}
               {m._streaming && <span className="stream-cursor">▍</span>}
             </div>
             {m.actions?.length > 0 && (
@@ -501,6 +541,16 @@ export default function ChatView({ refresh, initialMessage, onSeedConsumed, noti
                       <span className="kind-chip">操作</span>
                       {act.summary || act.op}
                     </div>
+                    {act.patch?.project && (
+                      <div className="action-attach">挂靠：<b>{act.patch.project}</b></div>
+                    )}
+                    {(act.op === 'create_event' || act.op === 'delete_event') && (
+                      <div className="action-attach">
+                        {act.patch?.date && `${act.patch.date} `}
+                        {act.patch?.start_time && `${act.patch.start_time}–${act.patch.end_time || ''} `}
+                        <b>{act.patch?.title || act.target}</b>
+                      </div>
+                    )}
                     {act._error && <div className="action-error">{act._error}</div>}
                     {act._done ? (
                       <div className="action-row">
@@ -589,10 +639,26 @@ export default function ChatView({ refresh, initialMessage, onSeedConsumed, noti
       </div>
 
       <form className="chat-input" onSubmit={send}>
+        {mention && mentionOptions.length > 0 && (
+          <div className="mention-panel">
+            {mentionOptions.map((a, i) => (
+              <button
+                type="button"
+                key={a.name}
+                className={`mention-item${i === mentionIdx ? ' active' : ''}`}
+                onMouseDown={(e) => { e.preventDefault(); pickMention(a) }}
+              >
+                <span className="mention-name">{a.name}</span>
+                <span className="mention-hint">{a.hint}</span>
+              </button>
+            ))}
+          </div>
+        )}
         <input
           value={input}
-          onChange={(e) => setInput(e.target.value)}
-          placeholder="和小白说话…"
+          onChange={onInputChange}
+          onKeyDown={onInputKey}
+          placeholder="和小白说话…（输入 # 可引用具体某件事）"
           disabled={busy}
         />
         <button

@@ -25,11 +25,21 @@ class LogIn(BaseModel):
     content: str
 
 
+class LogPatch(BaseModel):
+    kind: str | None = None
+    content: str | None = None
+
+
+class ProjectPatch(BaseModel):
+    status: str | None = None  # active/closed（closed = 完成，数据保留可恢复）
+
+
 @router.get("")
-def list_projects():
+def list_projects(include_closed: bool = False):
+    where = "" if include_closed else "WHERE status != 'closed'"
     with get_conn() as conn:
         rows = conn.execute(
-            "SELECT * FROM projects WHERE status != 'closed' ORDER BY id DESC"
+            f"SELECT * FROM projects {where} ORDER BY id DESC"
         ).fetchall()
         result = []
         for p in rows:
@@ -80,6 +90,70 @@ def add_log(project_id: int, log: LogIn):
             (project_id, log.kind, log.content.strip(), now),
         )
         return {"id": cur.lastrowid}
+
+
+@router.get("/{project_id}/logs")
+def list_logs(project_id: int):
+    """某事的全部进展日志（进展管理弹层数据源）"""
+    with get_conn() as conn:
+        if not conn.execute("SELECT 1 FROM projects WHERE id = ?", (project_id,)).fetchone():
+            raise HTTPException(404, "项目不存在")
+        rows = conn.execute(
+            "SELECT id, kind, content, created_at FROM progress_logs WHERE project_id = ? ORDER BY id DESC",
+            (project_id,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+@router.patch("/{project_id}/logs/{log_id}")
+def update_log(project_id: int, log_id: int, patch: LogPatch):
+    """编辑日志（背景包是实时聚合，改完即生效）"""
+    if patch.kind is not None and patch.kind not in LOG_KINDS:
+        raise HTTPException(400, f"kind 必须是 {LOG_KINDS} 之一")
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT id FROM progress_logs WHERE id = ? AND project_id = ?", (log_id, project_id)
+        ).fetchone()
+        if not row:
+            raise HTTPException(404, "日志不存在")
+        updates, params = [], []
+        for field in ("kind", "content"):
+            val = getattr(patch, field)
+            if val is not None:
+                updates.append(f"{field} = ?")
+                params.append(val.strip() if field == "content" else val)
+        if not updates:
+            raise HTTPException(400, "没有需要更新的字段")
+        params.append(log_id)
+        conn.execute(f"UPDATE progress_logs SET {', '.join(updates)} WHERE id = ?", params)
+    return {"ok": True}
+
+
+@router.delete("/{project_id}/logs/{log_id}")
+def delete_log(project_id: int, log_id: int):
+    with get_conn() as conn:
+        cur = conn.execute(
+            "DELETE FROM progress_logs WHERE id = ? AND project_id = ?", (log_id, project_id)
+        )
+        if cur.rowcount == 0:
+            raise HTTPException(404, "日志不存在")
+    return {"ok": True}
+
+
+@router.patch("/{project_id}")
+def update_project(project_id: int, patch: ProjectPatch):
+    """状态闭环：active ⇄ closed。完成时记 closed_at，恢复时清空。数据永不删除。"""
+    if patch.status not in (None, "active", "closed"):
+        raise HTTPException(400, "status 必须是 active/closed 之一")
+    now = datetime.now().isoformat(timespec="seconds")
+    with get_conn() as conn:
+        if not conn.execute("SELECT 1 FROM projects WHERE id = ?", (project_id,)).fetchone():
+            raise HTTPException(404, "项目不存在")
+        if patch.status == "closed":
+            conn.execute("UPDATE projects SET status='closed', closed_at=? WHERE id=?", (now, project_id))
+        elif patch.status == "active":
+            conn.execute("UPDATE projects SET status='active', closed_at=NULL WHERE id=?", (project_id,))
+    return {"ok": True}
 
 
 @router.get("/{project_id}/context-pack")

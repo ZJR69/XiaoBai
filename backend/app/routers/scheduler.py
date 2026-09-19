@@ -23,24 +23,54 @@ SCHEDULE_AHEAD_MIN = 15  # 日程开始前 15 分钟预告
 
 # ── 日程匹配（schedule.py 的 today 端点也复用） ──
 
-def _semester_week(d: date) -> int:
-    """教学周序号：学年 9 月起（1–8 月算上一学年），从 9 月 1 日所在周的周一起算第 1 周。
-    修复：春季学期（9 月前）不再算出负数周导致单双周错乱。"""
-    sep1_year = d.year if d.month >= 9 else d.year - 1
-    sep1 = date(sep1_year, 9, 1)
-    semester_start_monday = sep1 - timedelta(days=sep1.weekday())
-    return max(1, ((d - semester_start_monday).days // 7) + 1)
+WEEKDAY_NAMES = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
+DEFAULT_SEMESTER_START = date(2026, 9, 7)  # 用户实际开学日（settings.semester_start 可覆盖，换季手动改）
+
+
+def _semester_start(conn) -> date:
+    """学期第 1 周起点的周一：settings.semester_start（YYYY-MM-DD）优先，缺省用实际开学日。"""
+    row = conn.execute("SELECT value FROM settings WHERE key = 'semester_start'").fetchone()
+    if row:
+        try:
+            return date.fromisoformat(row["value"])
+        except ValueError:
+            pass
+    return DEFAULT_SEMESTER_START
+
+
+def _semester_week(d: date, semester_start: date | None = None) -> int:
+    """教学周序号：从学期起点所在周的周一起算第 1 周。
+    修复：旧版按 9 月 1 日所在周算，比学校实际校历（9 月 7 日开学）多算一周，单双周判定整体错位。"""
+    start = semester_start or DEFAULT_SEMESTER_START
+    monday = start - timedelta(days=start.weekday())
+    return max(1, ((d - monday).days // 7) + 1)
+
+
+def today_line() -> str:
+    """对话上下文固定注入的第一行：今天日期 + 星期 + 教学周 + 本周范围（时间意识的锚点）。"""
+    d = datetime.now().date()
+    monday = d - timedelta(days=d.weekday())
+    sunday = monday + timedelta(days=6)
+    with get_conn() as conn:
+        wk = _semester_week(d, _semester_start(conn))
+    return (f"今天是 {d.isoformat()} {WEEKDAY_NAMES[d.weekday()]}"
+            f"（教学第 {wk} 周：{monday:%m.%d}–{sunday:%m.%d}）")
 
 
 def slots_for_date(d: date | None = None) -> list[dict]:
-    """某天生效的日程（星期 + 单双周 + 有效范围）"""
+    """某天的完整日程 = 周期性 slots（星期 + 单双周 + 有效范围）+ 当天一次性 events。
+    返回条目带 source：'slot'（周期）/ 'event'（一次性）——周历据此区分渲染；
+    其余消费端（今日/预告/简报/对话召回）无需关心来源，改此一处全部自动获益。"""
     d = d or datetime.now().date()
     dow = d.weekday()
     iso = d.isoformat()
-    week_no = _semester_week(d)
     with get_conn() as conn:
+        week_no = _semester_week(d, _semester_start(conn))
         rows = conn.execute(
             "SELECT * FROM schedule_slots WHERE day_of_week = ?", (dow,)
+        ).fetchall()
+        events = conn.execute(
+            "SELECT * FROM schedule_events WHERE date = ?", (iso,)
         ).fetchall()
     out = []
     for r in rows:
@@ -52,8 +82,11 @@ def slots_for_date(d: date | None = None) -> list[dict]:
             continue
         if r["valid_to"] and iso > r["valid_to"]:
             continue
-        out.append(dict(r))
-    return sorted(out, key=lambda s: s["start_time"])
+        out.append({**dict(r), "source": "slot"})
+    for e in events:
+        # 归一化出 slot 同形字段（day_of_week/week_pattern），消费端不用分辨结构
+        out.append({**dict(e), "source": "event", "day_of_week": dow, "week_pattern": "all"})
+    return sorted(out, key=lambda s: s["start_time"] or "")
 
 
 def _notify(kind: str, title: str, detail: str = "", important: bool = False):
@@ -169,7 +202,7 @@ def _check_schedule_upcoming():
     now = datetime.now()
     now_hm = now.strftime("%H:%M")
     for s in slots_for_date(now.date()):
-        if s["start_time"] > now_hm:
+        if s["start_time"] and s["start_time"] > now_hm:
             # 分钟差计算
             sh, sm = map(int, s["start_time"].split(":"))
             nh, nm = now.hour, now.minute

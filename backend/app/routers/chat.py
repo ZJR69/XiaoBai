@@ -7,7 +7,7 @@
 """
 import json
 import re
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
@@ -74,7 +74,9 @@ def _entity_lines() -> list[str]:
 
 
 def _build_context() -> str:
-    """三层记忆注入（PRD 4.6）：core 全文 + 事务索引 + 实体索引 + 知识库目录"""
+    """三层记忆注入（PRD 4.6）：今天日期行（时间意识锚点）+ core 全文 + 事务索引 + 实体索引 + 知识库目录"""
+    from app.routers.scheduler import today_line
+
     with get_conn() as conn:
         tasks = conn.execute(
             """SELECT t.title, t.status, t.due_at, p.name AS project
@@ -89,7 +91,7 @@ def _build_context() -> str:
         ).fetchall()
         ongoing = _ongoing_lines(conn)
 
-    lines = ["【用户的当前状态（小白的后台记忆，真实数据）】"]
+    lines = [today_line(), "", "【用户的当前状态（小白的后台记忆，真实数据）】"]
 
     # 第一层：core.md 底座全文
     if CORE_MD.exists():
@@ -136,33 +138,162 @@ def _build_context() -> str:
 
 
 def _expand_mentions(message: str) -> str:
-    """关键词触发（PRD 4.6 注入层第 5 条）：消息提到项目/人物名 → 附加其详情。
-    Claude Code 同款精确关键词匹配，无需向量库。"""
+    """关键词触发（PRD 4.6 注入层第 5 条）：消息提到项目/任务/人物名 → 附加其完整上下文。
+    TRAE 式引用语义：名字一出现，小白就拿到该条目的背景，不依赖用户复述。"""
     if not message:
         return ""
     extras = []
     with get_conn() as conn:
         projects = conn.execute(
-            "SELECT id, name FROM projects WHERE status != 'closed'"
+            "SELECT id, name, description FROM projects WHERE status != 'closed'"
         ).fetchall()
         for p in projects:
             if p["name"] and p["name"] in message:
+                # 完整背景：描述 + 下一步 + 挂靠的未完成任务 + 最近日志
+                parts = [f"### 项目《{p['name']}》上下文"]
+                if p["description"]:
+                    parts.append(f"描述：{p['description']}")
+                nxt = conn.execute(
+                    "SELECT content FROM progress_logs WHERE project_id = ? AND kind = 'next_step' ORDER BY id DESC LIMIT 1",
+                    (p["id"],),
+                ).fetchone()
+                if nxt:
+                    parts.append(f"下一步：{nxt['content']}")
+                open_tasks = conn.execute(
+                    "SELECT title, status, due_at FROM tasks WHERE project_id = ? AND status IN ('backlog', 'active') ORDER BY priority",
+                    (p["id"],),
+                ).fetchall()
+                if open_tasks:
+                    task_lines = []
+                    for t in open_tasks:
+                        due = f"，截止 {t['due_at'][:10]}" if t["due_at"] else ""
+                        task_lines.append(f"- {t['title']} [{t['status']}]{due}")
+                    parts.append("挂靠任务：\n" + "\n".join(task_lines))
                 logs = conn.execute(
                     "SELECT kind, content, created_at FROM progress_logs WHERE project_id = ? ORDER BY id DESC LIMIT 5",
                     (p["id"],),
                 ).fetchall()
                 if logs:
-                    body = "\n".join(
+                    parts.append("最近进展：\n" + "\n".join(
                         f"- [{lg['kind']}] {lg['content']}（{lg['created_at'][:10]}）"
                         for lg in reversed(logs)
-                    )
-                    extras.append(f"### 项目《{p['name']}》最近进展\n{body}")
+                    ))
+                extras.append("\n".join(parts))
+        # 任务名命中 → 展开任务详情（含所属项目）。独立于项目命中——
+        # 旧版被 mentioned_ids 门控，只提任务名不提项目名时不展开（bug）
+        tasks = conn.execute(
+            """SELECT t.title, t.status, t.due_at, t.priority, p.name AS project
+               FROM tasks t LEFT JOIN projects p ON t.project_id = p.id
+               WHERE t.status IN ('backlog', 'active')"""
+        ).fetchall()
+        for t in tasks:
+            if t["title"] and t["title"] in message:
+                proj = f"，属于《{t['project']}》" if t["project"] else ""
+                due = f"，截止 {t['due_at'][:10]}" if t["due_at"] else ""
+                extras.append(f"### 任务《{t['title']}》\n状态 {t['status']}，优先级 P{t['priority']}{proj}{due}")
     if ENTITIES_DIR.exists():
         for f in sorted(ENTITIES_DIR.glob("*.md")):
             title = _page_title(f, f.stem)
             if title and title in message:
                 extras.append(f"### 实体页《{title}》\n{f.read_text(encoding='utf-8')[:3000]}")
     return "\n\n".join(extras)
+
+
+# ── 日期触发的日程召回（查询式注入，不是全塞）──
+# 消息提到日期词 → LLM 提取出具体日期 → 只展开这些日期的真实日程。没提日期的消息零开销。
+
+DATE_HINT = re.compile(
+    r"(今天|明天|后天|大后天|昨天|前天|周[一二三四五六日天]|星期[一二三四五六日天]|礼拜[一二三四五六日天]"
+    r"|下{1,2}周|本周|这周|\d{1,2}\s*月\s*\d{1,2}\s*[日号]?|\d{1,2}\s*[日号]|\d{4}-\d{1,2}-\d{1,2})"
+)
+
+DATE_EXTRACT_PROMPT = """从用户消息中提取其明确提到的所有日期，输出 JSON 数组（元素为 YYYY-MM-DD 字符串），没有就输出 []。
+今天是 {today}（{weekday}），以此为基准：
+- 今天/明天/后天/大后天/昨天/前天 直接推算
+- 「周X/星期X」不带修饰：未来最近的那个周X（含今天）；「这周/本周周X」：本周（周一起算）；「下周周X」：下一周
+- 「X月X日」：今年；「X号/X日」：本月
+- 一句话里可能提到多个日期，必须全部提取，一个不漏；作为参照的星期也算（例：「周日要上周二的课」→ 周日和周二两个日期都要输出）
+- 不要推测消息里没有的日期
+只输出 JSON 数组本身，不要任何解释。"""
+
+
+def _rule_dates(message: str, today: date) -> list[date]:
+    """确定性日期解析（parser 主体，覆盖高频表达，保证这些表达 100% 不漏不错）：
+    相对日（今天/明天/…）、(下下周/下周/下/这周/本周/这)?(周/星期/礼拜)X、X月X日、YYYY-MM-DD。"""
+    from datetime import timedelta
+
+    wd_map = {"一": 0, "二": 1, "三": 2, "四": 3, "五": 4, "六": 5, "日": 6, "天": 6}
+    out = set()
+    for w, off in (("大后天", 3), ("后天", 2), ("明天", 1), ("今天", 0), ("昨天", -1), ("前天", -2)):
+        if w in message:
+            out.add(today + timedelta(days=off))
+    monday = today - timedelta(days=today.weekday())
+    for m in re.finditer(r"(下下周|下周|下|这周|本周|这)?[周星期礼拜]([一二三四五六日天])", message):
+        prefix, wd = m.group(1), wd_map[m.group(2)]
+        if prefix == "下下周":
+            out.add(monday + timedelta(days=14 + wd))
+        elif prefix in ("下周", "下"):
+            out.add(monday + timedelta(days=7 + wd))
+        elif prefix in ("这周", "本周", "这"):
+            out.add(monday + timedelta(days=wd))
+        else:
+            out.add(today + timedelta(days=(wd - today.weekday()) % 7))  # 裸 周X：未来最近（含今天）
+    for m in re.finditer(r"(\d{4})-(\d{1,2})-(\d{1,2})", message):
+        try:
+            out.add(date(int(m.group(1)), int(m.group(2)), int(m.group(3))))
+        except ValueError:
+            pass
+    for m in re.finditer(r"(\d{1,2})\s*月\s*(\d{1,2})\s*[日号]?", message):
+        try:
+            out.add(date(today.year, int(m.group(1)), int(m.group(2))))
+        except ValueError:
+            pass
+    return sorted(out)
+
+
+def _schedule_recall(message: str) -> str:
+    """日期词触发的日程召回（查询式注入，不是全塞）：规则解析保证高频表达不漏 +
+    LLM 提取补长尾（如「圣诞」「3号」），取并集后逐日展开真实日程。
+    预筛无日期痕迹的消息直接返回，不为闲聊多付 LLM 调用。"""
+    if not message or not DATE_HINT.search(message):
+        return ""
+    from app.routers.scheduler import WEEKDAY_NAMES, slots_for_date
+
+    today = datetime.now().date()
+    found = set(_rule_dates(message, today))
+    if llm.llm_available():
+        prompt = DATE_EXTRACT_PROMPT.format(today=today.isoformat(), weekday=WEEKDAY_NAMES[today.weekday()])
+        try:
+            raw = llm.chat_completion(
+                [{"role": "system", "content": "你是日期提取器，只输出 JSON。"},
+                 {"role": "user", "content": prompt + "\n\n消息：" + message}],
+                temperature=0,
+            )
+            extracted = llm.extract_json(raw)
+            if isinstance(extracted, list):
+                for s in extracted:
+                    try:
+                        found.add(date.fromisoformat(str(s).strip()))
+                    except ValueError:
+                        continue
+        except Exception:
+            pass  # LLM 失败不挡主流程，规则解析结果仍可用
+    if not found:
+        return ""
+    lines = []
+    for d in sorted(found)[:5]:  # 封顶 5 天防上下文膨胀
+        head = f"{d.isoformat()} {WEEKDAY_NAMES[d.weekday()]}" + ("（今天）" if d == today else "")
+        slots = slots_for_date(d)
+        if not slots:
+            # 明确告知「空」，避免 LLM 误以为数据缺失而编日程
+            lines.append(f"{head}：当天没有日程")
+            continue
+        lines.append(head + "：")
+        for s in slots:
+            loc = f" @{s['location']}" if s.get("location") else ""
+            tag = "（一次性日程）" if s.get("source") == "event" else ""
+            lines.append(f"- {s['start_time']}–{s['end_time']} {s['title']}{loc}{tag}")
+    return "\n".join(lines)
 
 
 SYSTEM_PROMPT = """你是「小白」，用户的个人管理智能体，常驻在用户电脑上。
@@ -174,21 +305,26 @@ SYSTEM_PROMPT = """你是「小白」，用户的个人管理智能体，常驻�
 - 涉及修改用户数据（改日期、建任务、入库知识）时，你提出建议并等用户确认，绝不擅自执行
 
 约束：
+- 上下文第一行是今天的真实日期和教学周；所有相对日期（周日、下周二）都以它为基准推算，绝不自己猜日期
 - 只引用下方【当前状态】里真实存在的条目，不要编造不存在的任务或项目
 - 回复简洁，说重点，必要时用短列表
 - 用户说「处理这几条闪记」时：逐条理解，看懂的就提议去向（建任务/知识/丢弃，给出建议的标题、日期、归属），看不懂或有歧义就先问清楚再动手；永远等用户确认
 
 操作指令（对话驱动操作，用户点确认后才会执行）：
-- 用户让你做事（建任务、改日期、推截止、勾完成、加提醒）时，先用一两句自然的话回应，然后在回复最末尾输出一个操作块：
+- 用户让你做事（建任务、改日期、推截止、勾完成、加提醒、排日程）时，先用一两句自然的话回应，然后在回复最末尾输出一个操作块：
 <<<ACTION>>>
 {"op": "create_task", "target": null, "patch": {"title": "任务名", "due_at": "YYYY-MM-DD", "priority": 3}, "summary": "一句话说明这个操作做什么"}
 <<<END>>>
 - op 可选值：
-  create_task（patch: title 必填，due_at/priority 可选，priority 1高-5低）
+  create_task（patch: title 必填，due_at/priority 可选，priority 1高-5低，project 可选=挂靠的进行中的事名称，必须是【当前状态】里真实存在的名称，一字不差；不确定就不带）
   update_task（target 填要改的任务名，patch 只放要改的字段：due_at/priority/title/status）
-  complete_task（target 填要完成的任务名，不需要 patch）
+  complete_task（target 要完成的任务名，不需要 patch）
   create_reminder（patch: title、trigger_type: once/daily/weekly/interval、trigger_value 如 2026-10-01T09:00 或 09:00 或 2-09:00 或 4）
+  create_event（一次性日程。patch: title 必填、date 必填 YYYY-MM-DD；start_time/end_time HH:MM、entry_type: course/meeting/outing/personal、location 可选）
+  delete_event（删除一次性日程。target 填日程名，patch.date 可选=具体日期，用于区分同名日程）
 - 日期一律 YYYY-MM-DD；target 必须是【当前状态】里真实存在的条目名
+- 用户说「某天要上周X的课 / 要在某天加个安排」时：参照【你提到的日期对应的日程】（若已注入），为那一天逐门课/逐个安排各输出一个 create_event 操作块；日程里没有的课先问用户时间，不要编
+- 任务明显属于某件进行中的事时（用户提到或【当前状态】里列出的），create_task 带上 project 挂靠；名称对不上就先问，不要猜
 - 只是聊天、回答问题、给建议时不输出操作块；信息不全先问清楚，别猜着填"""
 
 
@@ -254,6 +390,9 @@ def chat(body: ChatIn):
         extra = _expand_mentions(body.message)
         if extra:
             context += "\n\n【相关详情（因为你提到了它，自动展开）】\n" + extra
+        sched = _schedule_recall(body.message)
+        if sched:
+            context += "\n\n【你提到的日期对应的日程（真实数据，来自日程表）】\n" + sched
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT + "\n\n" + context},
             *body.history[-20:],  # 最近 20 条防超长
@@ -415,6 +554,9 @@ def chat_stream(body: ChatIn):
             extra = _expand_mentions(body.message)
             if extra:
                 context += "\n\n【相关详情（因为你提到了它，自动展开）】\n" + extra
+            sched = _schedule_recall(body.message)
+            if sched:
+                context += "\n\n【你提到的日期对应的日程（真实数据，来自日程表）】\n" + sched
             messages = [
                 {"role": "system", "content": SYSTEM_PROMPT + "\n\n" + context},
                 *body.history[-20:],
@@ -447,7 +589,7 @@ TASK_FIELDS = ("title", "status", "priority", "due_at", "project_id")
 
 
 class ActionIn(BaseModel):
-    op: str  # create_task / update_task / complete_task / create_reminder
+    op: str  # create_task / update_task / complete_task / create_reminder / create_event / delete_event
     target: str | None = None
     patch: dict = {}
     summary: str = ""
@@ -478,9 +620,20 @@ def execute_action(body: ActionIn):
             title = str(body.patch.get("title") or "").strip()
             if not title:
                 return {"ok": False, "error": "create_task 需要 title"}
+            # 挂靠进行中的事（实体索引防幻觉）：project 名必须精确匹配真实条目
+            project_id = None
+            project_name = str(body.patch.get("project") or "").strip()
+            if project_name:
+                row = conn.execute(
+                    "SELECT id FROM projects WHERE name = ? AND status != 'closed'", (project_name,)
+                ).fetchone()
+                if not row:
+                    return {"ok": False, "error": f"没找到进行中的事「{project_name}」，请确认名称或先创建"}
+                project_id = row["id"]
             cur = conn.execute(
-                "INSERT INTO tasks (title, status, priority, due_at, created_at) VALUES (?, 'backlog', ?, ?, ?)",
-                (title, body.patch.get("priority", 3), body.patch.get("due_at"), now),
+                """INSERT INTO tasks (title, project_id, status, priority, due_at, created_at)
+                   VALUES (?, ?, 'backlog', ?, ?, ?)""",
+                (title, project_id, body.patch.get("priority", 3), body.patch.get("due_at"), now),
             )
             target_id = cur.lastrowid
         elif body.op in ("update_task", "complete_task"):
@@ -517,6 +670,48 @@ def execute_action(body: ActionIn):
                 (str(body.patch.get("title") or body.summary or "提醒").strip(), tt, tv),
             )
             target_id = cur.lastrowid
+        elif body.op == "create_event":
+            title = str(body.patch.get("title") or "").strip()
+            dt = str(body.patch.get("date") or "").strip()
+            if not title or not dt:
+                return {"ok": False, "error": "create_event 需要 title 和 date"}
+            try:
+                datetime.strptime(dt, "%Y-%m-%d")
+            except ValueError:
+                return {"ok": False, "error": f"date 格式应为 YYYY-MM-DD，收到 {dt}"}
+            et = str(body.patch.get("entry_type") or "personal").strip()
+            if et not in ("course", "meeting", "outing", "personal"):
+                et = "personal"
+            cur = conn.execute(
+                """INSERT INTO schedule_events (title, entry_type, date, start_time, end_time, location, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (title, et, dt,
+                 str(body.patch.get("start_time") or "09:00"),
+                 str(body.patch.get("end_time") or "10:00"),
+                 body.patch.get("location"), now),
+            )
+            target_id = cur.lastrowid
+        elif body.op == "delete_event":
+            target = (body.target or "").strip()
+            dt = str(body.patch.get("date") or "").strip()
+            row = None
+            if target and dt:
+                row = conn.execute(
+                    "SELECT * FROM schedule_events WHERE title = ? AND date = ? LIMIT 1", (target, dt)
+                ).fetchone()
+            if not row and target:
+                row = conn.execute(
+                    "SELECT * FROM schedule_events WHERE title = ? ORDER BY date LIMIT 1", (target,)
+                ).fetchone()
+            if not row and target:
+                row = conn.execute(
+                    "SELECT * FROM schedule_events WHERE title LIKE ? ORDER BY date LIMIT 1", (f"%{target}%",)
+                ).fetchone()
+            if not row:
+                return {"ok": False, "error": f"没找到一次性日程「{target}」"}
+            pre_image = dict(row)  # 撤销用整行快照（恢复插入）
+            conn.execute("DELETE FROM schedule_events WHERE id = ?", (row["id"],))
+            target_id = row["id"]
         else:
             return {"ok": False, "error": f"未知操作 {body.op}"}
 
@@ -560,6 +755,17 @@ def undo_action(body: UndoIn):
                 conn.execute("UPDATE tasks SET completed_at = NULL WHERE id = ?", (tid,))
         elif op == "create_reminder" and tid:
             conn.execute("DELETE FROM reminders WHERE id = ?", (tid,))
+        elif op == "create_event" and tid:
+            conn.execute("DELETE FROM schedule_events WHERE id = ?", (tid,))
+        elif op == "delete_event" and pre_image:
+            # 删了又撤：按快照整行恢复（含原 id）
+            conn.execute(
+                """INSERT INTO schedule_events (id, title, entry_type, date, start_time, end_time, location, note, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (pre_image.get("id"), pre_image.get("title"), pre_image.get("entry_type"),
+                 pre_image.get("date"), pre_image.get("start_time"), pre_image.get("end_time"),
+                 pre_image.get("location"), pre_image.get("note"), pre_image.get("created_at")),
+            )
         else:
             return {"ok": False, "error": "该操作不支持撤销"}
         conn.execute(
