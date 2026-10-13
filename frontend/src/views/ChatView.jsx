@@ -1,32 +1,43 @@
 import { useEffect, useRef, useState } from 'react'
 import { api } from '../api.js'
+import DraftStrip from './DraftStrip.jsx'
 
-export default function ChatView({ refresh, initialMessage, onSeedConsumed, notice, onNoticeConsumed, goView }) {
+export default function ChatView({ refresh, notice, onNoticeConsumed, goView }) {
   const [messages, setMessages] = useState([]) // {role, content, actions?}
   const [input, setInput] = useState('')
   const [busy, setBusy] = useState(false)
-  const [proposals, setProposals] = useState(null) // 回顾生成的提案清单
-  const [reviewing, setReviewing] = useState(false)
   const [feedbackMode, setFeedbackMode] = useState(false)
   const [extracting, setExtracting] = useState(false) // 结束复盘防连点
   const [anchors, setAnchors] = useState([]) // 实体锚点名单（真实库条目，IDS 2.1）
-  const [editIdx, setEditIdx] = useState(null) // 修改中的提案序号
-  const [editDraft, setEditDraft] = useState({ title: '', detail: '' })
   const [sessions, setSessions] = useState([]) // 会话列表（最近活跃在前）
   const [activeSession, setActiveSession] = useState(null) // 当前会话 id（null = 新对话，首条消息时后端建）
   const [sessionOpen, setSessionOpen] = useState(false) // 左侧会话面板开关
   const [mention, setMention] = useState(null) // 「#」引用中：{query, start}
   const [mentionIdx, setMentionIdx] = useState(0)
+  const [draftMode, setDraftMode] = useState(false) // 输入框模式：对话 / 草稿（闪记并入，速记零决策）
+  const [drafts, setDrafts] = useState([]) // 草稿本条目（inbox 未处理）
   const bottomRef = useRef(null)
   const historyLoaded = useRef(false)
+  const inputRef = useRef(null)
+
+  // 输入框自动增高（对标主流大模型产品）：1 行起步，随内容长高，约 6 行封顶后内部滚动
+  useEffect(() => {
+    const el = inputRef.current
+    if (!el) return
+    el.style.height = 'auto'
+    el.style.height = `${Math.min(el.scrollHeight, 160)}px`
+  }, [input])
 
   const loadAnchors = () =>
     api.listAnchors().then((r) => setAnchors(r.anchors || [])).catch(() => {})
   useEffect(() => { loadAnchors() }, [])
 
+  const loadDrafts = () => api.listInbox().then(setDrafts).catch(() => {})
+  useEffect(() => { loadDrafts() }, [])
+
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [messages, proposals])
+  }, [messages])
 
   // 历史消息打标：☀=早报 🌙=复盘 ⏰=提醒（后端持久化时带前缀，恢复后样式不降级）
   const tagMessage = (m) => ({
@@ -51,7 +62,6 @@ export default function ChatView({ refresh, initialMessage, onSeedConsumed, noti
   const openSession = async (sid) => {
     if (busy) return // 流式输出中切换会话会让增量写到错误的会话视图上
     setSessionOpen(false)
-    setProposals(null)
     try {
       const res = await api.sessionMessages(sid)
       setMessages(res.messages.map(tagMessage))
@@ -65,7 +75,6 @@ export default function ChatView({ refresh, initialMessage, onSeedConsumed, noti
   const newSession = () => {
     if (busy) return
     setSessionOpen(false)
-    setProposals(null)
     setMessages([])
     setActiveSession(null)
   }
@@ -99,7 +108,6 @@ export default function ChatView({ refresh, initialMessage, onSeedConsumed, noti
 
   // ── 初始化（严格时序：先打开最近会话 → 再简报 → 再复盘，消除挂载竞态）──
   useEffect(() => {
-    if (initialMessage) return
     let cancelled = false
     ;(async () => {
       // 1. 打开最近活跃的会话（没有则空视图，等首条消息）
@@ -131,18 +139,10 @@ export default function ChatView({ refresh, initialMessage, onSeedConsumed, noti
         console.error('briefing failed:', err)
       }
       if (cancelled) return
-      // 3. 晚间复盘：20 点后 pending → 发起；in_progress → 恢复按钮
+      // 3. 晚间复盘（召唤式，阶段四）：只恢复进行中状态，不自动发起
       try {
         const { status } = await api.feedbackShouldStart()
-        if (!cancelled && status === 'pending') {
-          const res = await api.feedbackStart()
-          if (!cancelled && res.ok) {
-            setMessages((m) => [...m, { role: 'assistant', content: `🌙 ${res.opening}`, feedback: true }])
-            setFeedbackMode(true)
-          }
-        } else if (!cancelled && status === 'in_progress') {
-          setFeedbackMode(true)
-        }
+        if (!cancelled && status === 'in_progress') setFeedbackMode(true)
       } catch (err) {
         console.error('feedback check failed:', err)
       }
@@ -151,23 +151,11 @@ export default function ChatView({ refresh, initialMessage, onSeedConsumed, noti
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // 周期检查（60s）：跨 20 点发起复盘、跨天出简报（应用常开场景）
+  // 周期检查（60s）：跨天出简报（应用常开场景；复盘改召唤式后不再自动发起）
   useEffect(() => {
     const timer = setInterval(async () => {
-      if (initialMessage || !historyLoaded.current) return
+      if (!historyLoaded.current) return
       try {
-        const fb = await api.feedbackShouldStart()
-        if (fb.status === 'pending') {
-          const res = await api.feedbackStart()
-          if (res.ok) {
-            setMessages((m) => [...m, { role: 'assistant', content: `🌙 ${res.opening}`, feedback: true }])
-            setFeedbackMode(true)
-          }
-        } else if (fb.status === 'in_progress') {
-          setFeedbackMode(true)
-        } else if (fb.status === 'not_yet') {
-          setFeedbackMode(false)
-        }
         const br = await api.briefingShouldShow()
         if (br.show) {
           const b = await api.getBriefing()
@@ -194,6 +182,22 @@ export default function ChatView({ refresh, initialMessage, onSeedConsumed, noti
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [notice])
+
+  // 召唤式复盘（阶段四）：想复盘点一下，小白带着今日数据开场
+  const startFeedback = async () => {
+    if (busy) return
+    try {
+      const res = await api.feedbackStart()
+      if (res.ok) {
+        setMessages((m) => [...m, { role: 'assistant', content: `🌙 ${res.opening}`, feedback: true }])
+        setFeedbackMode(true)
+      } else {
+        setMessages((m) => [...m, { role: 'assistant', content: '（今天的复盘已经存过了，明天再来）', feedback: true }])
+      }
+    } catch (err) {
+      setMessages((m) => [...m, { role: 'assistant', content: `（复盘发起失败：${err.message}）` }])
+    }
+  }
 
   // 结束复盘：提取信号（完成的事/负荷/修正意见）→ 阈值自校准
   const endFeedback = async () => {
@@ -340,42 +344,91 @@ export default function ChatView({ refresh, initialMessage, onSeedConsumed, noti
         .join('|')})`, 'g')
     : null
 
+  // 资源锚点（阶段二）：网址新开标签；文件/文件夹让后端 explorer 定位（选中不打开）
+  const openLinkAnchor = async (a) => {
+    if (a.link_kind === 'url') {
+      window.open(a.target, '_blank', 'noopener')
+      return
+    }
+    try {
+      await api.openLink(a.link_id)
+    } catch (err) {
+      alert(`打开失败：${err.message}`)
+    }
+  }
+
   const renderAnchored = (text) => {
     if (!anchorRe) return text
     return text.split(anchorRe).map((part, i) => {
       const a = anchorMap[part]
       if (!a) return part
-      const view = a.kind === 'project' ? 'projects' : a.kind === 'task' ? 'timeline' : 'knowledge'
+      if (a.kind === 'link') {
+        return (
+          <a key={i} className="entity-anchor" title={`${a.hint}：${a.target}`}
+            onClick={() => openLinkAnchor(a)}>
+            {part}
+          </a>
+        )
+      }
+      // 锚点只剩 project/task（阶段四 wiki 锚点已摘）：都跳工作台
       return (
         <a key={i} className="entity-anchor" title={a.hint}
-          onClick={() => goView?.(view)}>
+          onClick={() => goView?.('workbench')}>
           {part}
         </a>
       )
     })
   }
 
-  // 召唤式处理：从闪记视图带来的首批消息自动发送
-  const seedSent = useRef(false)
-  useEffect(() => {
-    if (initialMessage && !seedSent.current) {
-      seedSent.current = true
-      onSeedConsumed?.()
-      sendText(initialMessage)
+  // ── 草稿本（闪记并入）：回车速记不走 LLM；转待办进任务池（无日期）；处理走对话提案闭环 ──
+  const captureDraft = async (raw) => {
+    const text = raw.trim()
+    if (!text) return
+    try {
+      await api.capture(text)
+      loadDrafts()
+    } catch (err) {
+      setMessages((m) => [...m, { role: 'assistant', content: `（草稿没存上：${err.message}）` }])
     }
-  }, [initialMessage])
+  }
 
-  const send = (e) => {
-    e.preventDefault()
+  const draftToTask = async (d) => {
+    try {
+      await api.createTask({ title: d.content, due_at: null, project_id: null })
+      await api.discardInbox(d.id)
+      loadDrafts()
+      refresh?.()
+    } catch (err) {
+      alert(`转待办失败：${err.message}`)
+    }
+  }
+
+  const dropDraft = async (d) => {
+    await api.discardInbox(d.id).catch(() => {})
+    loadDrafts()
+  }
+
+  // 发送共用入口：对话模式走 LLM，草稿模式直存 inbox
+  const submit = () => {
     const text = input
     setInput('')
     setMention(null)
+    if (draftMode) {
+      captureDraft(text)
+      return
+    }
     sendText(text)
+  }
+
+  const send = (e) => {
+    e.preventDefault()
+    submit()
   }
 
   // ── 「#」引用真实条目（实体索引，防幻觉）：输入 #关键字 弹真实库条目，选中替换为精确名称 ──
   const onInputChange = (e) => {
     setInput(e.target.value)
+    if (draftMode) return // 草稿模式不做 # 引用（速记零决策）
     const pos = e.target.selectionStart
     const m = e.target.value.slice(0, pos).match(/#[^\s#]*$/)
     setMention(m ? { query: m[0].slice(1), start: pos - m[0].length } : null)
@@ -397,95 +450,38 @@ export default function ChatView({ refresh, initialMessage, onSeedConsumed, noti
   }
 
   const onInputKey = (e) => {
-    if (!mention || mentionOptions.length === 0) return
-    if (e.key === 'ArrowDown') {
-      e.preventDefault()
-      setMentionIdx((i) => (i + 1) % mentionOptions.length)
-    } else if (e.key === 'ArrowUp') {
-      e.preventDefault()
-      setMentionIdx((i) => (i - 1 + mentionOptions.length) % mentionOptions.length)
-    } else if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault()
-      pickMention(mentionOptions[mentionIdx])
-    } else if (e.key === 'Escape') {
-      setMention(null)
-    }
-  }
-
-  // 回顾对话 → 批量提案（防污染：对话中绝不打断，按需回顾）
-  const review = async () => {
-    if (messages.length === 0 || reviewing) return
-    setReviewing(true)
-    try {
-      const res = await api.reviewConversation(messages)
-      setProposals(res)
-    } catch (err) {
-      setProposals({ proposals: [], note: `回顾失败：${err.message}` })
-    } finally {
-      setReviewing(false)
-    }
-  }
-
-  const decide = async (idx, action) => {
-    setProposals((p) => {
-      const next = { ...p, proposals: p.proposals.map((x, i) => (i === idx ? { ...x, _decision: action } : x)) }
-      return next
-    })
-  }
-
-  // 修改后同意（IDS 2.2 三种裁决之一）：改标题/内容再入库
-  const startEditProposal = (idx) => {
-    const p = proposals.proposals[idx]
-    setEditIdx(idx)
-    setEditDraft({ title: p.title || '', detail: p.detail || '' })
-  }
-
-  const saveEditProposal = () => {
-    setProposals((p) => ({
-      ...p,
-      proposals: p.proposals.map((x, i) =>
-        i === editIdx ? { ...x, title: editDraft.title.trim() || x.title, detail: editDraft.detail.trim() || x.detail, _decision: 'approve' } : x
-      ),
-    }))
-    setEditIdx(null)
-  }
-
-  const applyAll = async () => {
-    const approved = proposals.proposals.filter((p) => p._decision === 'approve')
-    const rejected = proposals.proposals.filter((p) => p._decision === 'reject')
-    if (approved.length === 0 && rejected.length === 0) {
-      setProposals(null)
-      return
-    }
-    try {
-      const res = await api.applyProposals(approved, rejected)
-      // 如实汇报：成功与失败分开说，不谎报全入库
-      const ok = res.applied.filter((a) => a.ok !== false)
-      const failed = res.applied.filter((a) => a.ok === false)
-      const parts = []
-      if (ok.length) {
-        parts.push(`已入库 ${ok.length} 条：\n` + ok.map((a) => `· ${a.title}${a.note ? `（${a.note}）` : ''}`).join('\n'))
+    // 「#」引用面板打开时：方向键导航 / Enter 选中 / Esc 关闭（优先于发送）
+    if (mention && mentionOptions.length > 0) {
+      if (e.key === 'ArrowDown') {
+        e.preventDefault()
+        setMentionIdx((i) => (i + 1) % mentionOptions.length)
+        return
       }
-      if (failed.length) {
-        parts.push(`未执行 ${failed.length} 条（请手动处理）：\n` + failed.map((a) => `· ${a.title}（${a.error}）`).join('\n'))
+      if (e.key === 'ArrowUp') {
+        e.preventDefault()
+        setMentionIdx((i) => (i - 1 + mentionOptions.length) % mentionOptions.length)
+        return
       }
-      if (res.flash_closed > 0) {
-        parts.push(`闪记池已同步关闭 ${res.flash_closed} 条`)
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault()
+        pickMention(mentionOptions[mentionIdx])
+        return
       }
-      setMessages((m) => [
-        ...m,
-        { role: 'assistant', content: parts.join('\n\n') || `已记录：丢弃 ${rejected.length} 条提案。` },
-      ])
-      setProposals(null)
-      refresh?.()
-      loadAnchors() // 新建条目即时成为锚点
-    } catch (err) {
-      setMessages((m) => [
-        ...m,
-        { role: 'assistant', content: `（入库执行失败：${err.message}，提案保留，可重试）` },
-      ])
+      if (e.key === 'Escape') {
+        setMention(null)
+        return
+      }
+    }
+    // Enter 发送 / Shift+Enter 换行（对标主流大模型产品；中文输入法组词确认的 Enter 不触发发送）
+    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+      e.preventDefault()
+      submit()
     }
   }
+
+  // 沉淀（回顾对话→提案裁决）已退役（2026-09-26 铁律分层定案）：
+  // 进展记录由后端 _auto_memory 对话结束自动入库（进行中的事页面可见可删可改）；
+  // 结构化操作（建任务/登记资源）由操作卡承担。这里不再有任何提案 UI。
 
   return (
     <div className="chat-view">
@@ -514,6 +510,35 @@ export default function ChatView({ refresh, initialMessage, onSeedConsumed, noti
           </div>
         </>
       )}
+      {/* 顶栏（对标 ChatGPT/Claude）：左=会话侧栏开关+新对话，右=早报/复盘（✦沉淀已随 2026-09-26 自动记忆定案退役） */}
+      <div className="chat-topbar">
+        <div className="chat-topbar-side">
+          <button
+            className="topbar-icon"
+            onClick={() => { if (!sessionOpen) loadSessions(); setSessionOpen(!sessionOpen) }}
+            title="对话列表：切换、新建、删除、分支"
+          >
+            <svg viewBox="0 0 24 24"><path d="M4 6.5h16M4 12h16M4 17.5h10"/></svg>
+          </button>
+          <button className="topbar-icon" onClick={newSession} disabled={busy} title="新对话">
+            <svg viewBox="0 0 24 24"><path d="M15.5 4.5l4 4L8 20H4v-4L15.5 4.5Z"/><path d="M13.5 6.5l4 4"/></svg>
+          </button>
+        </div>
+        <div className="chat-topbar-side">
+          <button className="topbar-icon" onClick={showBriefing} disabled={busy} title="重看今日早报">
+            <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.8"/><path d="M12 3.5v2M12 18.5v2M3.5 12h2M18.5 12h2M6 6l1.4 1.4M16.6 16.6 18 18M18 6l-1.4 1.4M7.4 16.6 6 18"/></svg>
+          </button>
+          {feedbackMode ? (
+            <button className="topbar-icon on" onClick={endFeedback} disabled={busy || extracting} title="结束复盘：提取信号，校准后续安排">
+              <svg viewBox="0 0 24 24"><path d="M20 13.5A8 8 0 0 1 10.5 4 8 8 0 1 0 20 13.5Z"/></svg>{extracting ? '…' : ''}
+            </button>
+          ) : (
+            <button className="topbar-icon" onClick={startFeedback} disabled={busy} title="复盘：回顾今天，校准明天的安排">
+              <svg viewBox="0 0 24 24"><path d="M20 13.5A8 8 0 0 1 10.5 4 8 8 0 1 0 20 13.5Z"/></svg>
+            </button>
+          )}
+        </div>
+      </div>
       <div className="chat-scroll">
         {messages.length === 0 && (
           <div className="chat-empty">
@@ -536,11 +561,17 @@ export default function ChatView({ refresh, initialMessage, onSeedConsumed, noti
             {m.actions?.length > 0 && (
               <div className="action-stack">
                 {m.actions.map((act, j) => (
-                  <div key={j} className={`action-card${act._done ? ' done' : ''}${act._skipped ? ' skipped' : ''}`}>
+                  <div key={j} className={`action-card${act._done ? ' done' : ''}${act._skipped ? ' skipped' : ''}${String(act.op).startsWith('delete_') ? ' destructive' : ''}`}>
                     <div className="action-summary">
-                      <span className="kind-chip">操作</span>
+                      <span className="kind-chip">{String(act.op).startsWith('delete_') ? '删除' : '操作'}</span>
                       {act.summary || act.op}
                     </div>
+                    {String(act.op).startsWith('delete_') && !act._done && (
+                      <div className="action-attach danger">将删除「{act.target}」，执行后可在本条内撤销</div>
+                    )}
+                    {act.op === 'create_project' && (
+                      <div className="action-attach">新建事务：<b>{act.patch?.name}</b>{act.patch?.category && `（${{ research: '科研', collaboration: '合作', family: '家庭', personal: '个人', club: '社团', course: '课程', other: '其他' }[act.patch.category] || act.patch.category}）`}</div>
+                    )}
                     {act.patch?.project && (
                       <div className="action-attach">挂靠：<b>{act.patch.project}</b></div>
                     )}
@@ -549,6 +580,13 @@ export default function ChatView({ refresh, initialMessage, onSeedConsumed, noti
                         {act.patch?.date && `${act.patch.date} `}
                         {act.patch?.start_time && `${act.patch.start_time}–${act.patch.end_time || ''} `}
                         <b>{act.patch?.title || act.target}</b>
+                      </div>
+                    )}
+                    {act.op === 'create_link' && (
+                      <div className="action-attach">
+                        登记资源：<b>{act.patch?.title}</b>
+                        {act.patch?.kind ? `（${{ url: '网址', file: '文件', folder: '文件夹' }[act.patch.kind] || act.patch.kind}）` : ''}
+                        <div className="hint">{act.patch?.target}</div>
                       </div>
                     )}
                     {act._error && <div className="action-error">{act._error}</div>}
@@ -574,72 +612,13 @@ export default function ChatView({ refresh, initialMessage, onSeedConsumed, noti
         {busy && !(messages.length > 0 && messages[messages.length - 1]._streaming) && (
           <div className="bubble assistant"><div className="bubble-name">小白</div><div className="bubble-content typing">…</div></div>
         )}
-
-        {proposals && (
-          <div className="proposal-panel">
-            <div className="proposal-head">
-              记忆同步 · 提案清单
-              <button className="icon-btn" onClick={() => setProposals(null)}>×</button>
-            </div>
-            {proposals.note && <p className="proposal-note">{proposals.note}</p>}
-            {proposals.proposals?.length === 0 && !proposals.note && (
-              <p className="proposal-note">这段对话没有需要入库的共识。</p>
-            )}
-            {proposals.proposals?.map((p, i) => (
-              <div key={i} className={`proposal-item ${p._decision || ''}`}>
-                {editIdx === i ? (
-                  <>
-                    <input
-                      className="proposal-edit-title"
-                      value={editDraft.title}
-                      onChange={(e) => setEditDraft((d) => ({ ...d, title: e.target.value }))}
-                      placeholder="标题"
-                    />
-                    <textarea
-                      className="proposal-edit-detail"
-                      value={editDraft.detail}
-                      onChange={(e) => setEditDraft((d) => ({ ...d, detail: e.target.value }))}
-                      rows={3}
-                      placeholder="内容"
-                    />
-                    <div className="proposal-actions">
-                      <button className="small-btn primary" onClick={saveEditProposal}>保存并同意</button>
-                      <button className="small-btn" onClick={() => setEditIdx(null)}>取消</button>
-                    </div>
-                  </>
-                ) : (
-                  <>
-                    <div className="proposal-title">
-                      <span className="kind-chip">{p.kind}</span> {p.title}
-                    </div>
-                    <div className="proposal-detail">{p.detail}</div>
-                    <div className="proposal-evidence">来源：{p.evidence}</div>
-                    {!p._decision ? (
-                      <div className="proposal-actions">
-                        <button className="small-btn primary" onClick={() => decide(i, 'approve')}>同意</button>
-                        <button className="small-btn" onClick={() => startEditProposal(i)}>修改后同意</button>
-                        <button className="small-btn" onClick={() => decide(i, 'reject')}>丢弃</button>
-                      </div>
-                    ) : (
-                      <div className="proposal-actions">
-                        {p._decision === 'approve' ? '✓ 将入库' : '✗ 已丢弃'}
-                        <button className="small-btn" onClick={() => decide(i, undefined)}>撤销</button>
-                      </div>
-                    )}
-                  </>
-                )}
-              </div>
-            ))}
-            <button className="small-btn primary wide" onClick={applyAll}>
-              执行入库（仅同意项）
-            </button>
-          </div>
-        )}
         <div ref={bottomRef} />
       </div>
 
+      <DraftStrip drafts={drafts} onToTask={draftToTask} onDrop={dropDraft} />
+
       <form className="chat-input" onSubmit={send}>
-        {mention && mentionOptions.length > 0 && (
+        {mention && !draftMode && mentionOptions.length > 0 && (
           <div className="mention-panel">
             {mentionOptions.map((a, i) => (
               <button
@@ -654,34 +633,22 @@ export default function ChatView({ refresh, initialMessage, onSeedConsumed, noti
             ))}
           </div>
         )}
-        <input
+        <div className="mode-toggle" title="对话：和小白商量；草稿：速记，有空再处理">
+          <button type="button" className={draftMode ? '' : 'on'} onClick={() => setDraftMode(false)}>对话</button>
+          <button type="button" className={draftMode ? 'on' : ''} onClick={() => setDraftMode(true)}>
+            草稿{drafts.length > 0 ? ` ${drafts.length}` : ''}
+          </button>
+        </div>
+        <textarea
+          ref={inputRef}
+          rows={1}
           value={input}
           onChange={onInputChange}
           onKeyDown={onInputKey}
-          placeholder="和小白说话…（输入 # 可引用具体某件事）"
-          disabled={busy}
+          placeholder={draftMode ? '速记：想到什么记什么，回车存草稿…' : '和小白说话…（# 引用条目，Shift+Enter 换行）'}
+          disabled={busy && !draftMode}
         />
-        <button
-          type="button"
-          className="review-btn"
-          onClick={() => { if (!sessionOpen) loadSessions(); setSessionOpen(!sessionOpen) }}
-          disabled={busy}
-          title="对话列表：切换、新建、删除、分支"
-        >
-          对话
-        </button>
-        {feedbackMode && (
-          <button type="button" className="review-btn feedback" onClick={endFeedback} disabled={busy || extracting} title="结束今晚的复盘，小白提取信号校准后续安排">
-            {extracting ? '提取中…' : '结束复盘'}
-          </button>
-        )}
-        <button type="button" className="review-btn" onClick={showBriefing} disabled={busy} title="重看今日早报">
-          早报
-        </button>
-        <button type="button" className="review-btn" onClick={review} disabled={reviewing || messages.length === 0} title="回顾本段对话，提取共识生成入库提案">
-          {reviewing ? '回顾中…' : '回顾对话'}
-        </button>
-        <button type="submit" disabled={busy || !input.trim()}>发送</button>
+        <button type="submit" disabled={draftMode ? !input.trim() : busy || !input.trim()}>{draftMode ? '记下' : '发送'}</button>
       </form>
     </div>
   )

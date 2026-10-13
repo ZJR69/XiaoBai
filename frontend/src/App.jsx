@@ -1,60 +1,18 @@
 import { useEffect, useRef, useState } from 'react'
 import { api } from './api.js'
 import ChatView from './views/ChatView.jsx'
-import FlashView from './views/FlashView.jsx'
+import WorkbenchView from './views/WorkbenchView.jsx'
 import ProjectsView from './views/ProjectsView.jsx'
-import TimelineView from './views/TimelineView.jsx'
 import KnowledgeView from './views/KnowledgeView.jsx'
 import LifeView from './views/LifeView.jsx'
 
 const NAV = [
   { key: 'chat', label: '对话' },
-  { key: 'flash', label: '闪记' },
+  { key: 'workbench', label: '工作台' },
   { key: 'projects', label: '进行中的事' },
-  { key: 'timeline', label: '时间轴' },
   { key: 'knowledge', label: '知识库' },
   { key: 'life', label: '生活角' },
 ]
-
-// dropzone 变更监听提示：轮询后端事件（watchdog 检测到新文件时显示）
-function WatchTip({ onGoRaw }) {
-  const [since, setSince] = useState(null)
-  const [count, setCount] = useState(0)
-  const sinceRef = useRef(null)
-
-  useEffect(() => {
-    const poll = async () => {
-      try {
-        const res = await api.rawEvents(sinceRef.current ?? 0)
-        if (sinceRef.current === null) {
-          // 首次：建立基线，不提示历史事件
-          sinceRef.current = res.now
-        } else if (res.count > 0) {
-          setCount(res.count)
-          sinceRef.current = res.now
-        }
-      } catch {
-        /* 后端未启动时静默 */
-      }
-    }
-    poll()
-    const timer = setInterval(poll, 15000)
-    return () => clearInterval(timer)
-  }, [])
-
-  if (count === 0) return null
-  const goRaw = () => {
-    setCount(0) // 处理意图已表达，提示清零（下次新事件再提示）
-    onGoRaw()
-  }
-  return (
-    <div className="watch-tip" onClick={goRaw} title="点击去原料区处理">
-      投放区有动静（{count} 个事件）
-      <br />
-      要消化吗？
-    </div>
-  )
-}
 
 // 通知中心：轮询调度器触发的通知（提醒/截止/日程预告），铃铛角标 + 点开列表
 function NotifyBell({ onImportant }) {
@@ -105,7 +63,7 @@ function NotifyBell({ onImportant }) {
   return (
     <div className="notify-wrap" ref={wrapRef}>
       <button className="notify-bell" onClick={() => setOpen((o) => !o)} title="通知">
-        🔔
+        <svg viewBox="0 0 24 24"><path d="M6 9.5a6 6 0 1 1 12 0c0 4 1.5 5.5 2 6H4c.5-.5 2-2 2-6Z"/><path d="M10 18.5a2 2 0 0 0 4 0"/></svg>
         {openItems.length > 0 && <span className="nav-badge">{openItems.length}</span>}
       </button>
       {open && (
@@ -162,7 +120,8 @@ function SearchBox() {
             搜索「{result.q}」
             <button className="icon-btn" onClick={() => setResult(null)}>×</button>
           </div>
-          {result.wiki.length === 0 && result.tasks.length === 0 && result.projects.length === 0 && (
+          {result.wiki.length === 0 && result.tasks.length === 0 && result.projects.length === 0 &&
+           result.links.length === 0 && result.events.length === 0 && result.reminders.length === 0 && (
             <p className="empty">没有匹配结果。</p>
           )}
           {result.wiki.length > 0 && <div className="search-group">知识库</div>}
@@ -184,6 +143,25 @@ function SearchBox() {
               <div className="notify-title">{t.title} <span className="hint">（{t.status}{t.due_at ? `，截止 ${t.due_at.slice(5, 10)}` : ''}）</span></div>
             </div>
           ))}
+          {result.links.length > 0 && <div className="search-group">资源</div>}
+          {result.links.map((l) => (
+            <div key={l.id} className="notify-item">
+              <div className="notify-title">{l.title} <span className="hint">（{l.kind}）</span></div>
+              {l.target && <div className="notify-detail">{l.target}</div>}
+            </div>
+          ))}
+          {result.events.length > 0 && <div className="search-group">日程</div>}
+          {result.events.map((e) => (
+            <div key={e.id} className="notify-item">
+              <div className="notify-title">{e.title} <span className="hint">（{e.date} {e.start_time || ''}{e.rrule ? '，重复系列' : ''}）</span></div>
+            </div>
+          ))}
+          {result.reminders.length > 0 && <div className="search-group">提醒</div>}
+          {result.reminders.map((r) => (
+            <div key={r.id} className="notify-item">
+              <div className="notify-title">{r.title} <span className="hint">（{r.trigger_type}{r.trigger_value ? ` ${r.trigger_value}` : ''}）</span></div>
+            </div>
+          ))}
         </div>
       )}
     </div>
@@ -192,22 +170,9 @@ function SearchBox() {
 
 export default function App() {
   const [view, setView] = useState('chat')
-  const [status, setStatus] = useState({ openTasks: 0, inbox: 0, reminders: 0 })
   const [refreshKey, setRefreshKey] = useState(0)
-  const [chatSeed, setChatSeed] = useState(null)
   const [notice, setNotice] = useState(null)
-  const [knowledgeTab, setKnowledgeTab] = useState('wiki')
   const refresh = () => setRefreshKey((k) => k + 1)
-
-  useEffect(() => {
-    api.statusBar().then(setStatus).catch(console.error)
-  }, [refreshKey, view])
-
-  // 召唤式处理：闪记视图勾选后带上下文切到对话流
-  const startChatWith = (text) => {
-    setChatSeed(text)
-    setView('chat')
-  }
 
   return (
     <div className="shell">
@@ -224,18 +189,11 @@ export default function App() {
               onClick={() => setView(n.key)}
             >
               {n.label}
-              {n.key === 'flash' && status.inbox > 0 && (
-                <span className="nav-badge">{status.inbox}</span>
-              )}
             </button>
           ))}
         </nav>
         <div className="sidebar-status">
           <SearchBox />
-          <WatchTip onGoRaw={() => { setKnowledgeTab('raw'); setView('knowledge') }} />
-          <div>待办 {status.openTasks}</div>
-          <div>闪记 {status.inbox}</div>
-          <div>提醒 {status.reminders}</div>
         </div>
       </aside>
 
@@ -243,19 +201,14 @@ export default function App() {
         {view === 'chat' && (
           <ChatView
             refresh={refresh}
-            initialMessage={chatSeed}
-            onSeedConsumed={() => setChatSeed(null)}
             notice={view === 'chat' ? notice : null}
             onNoticeConsumed={() => setNotice(null)}
             goView={setView}
           />
         )}
-        {view === 'flash' && (
-          <FlashView refreshKey={refreshKey} refresh={refresh} startChatWith={startChatWith} />
-        )}
+        {view === 'workbench' && <WorkbenchView refreshKey={refreshKey} refresh={refresh} />}
         {view === 'projects' && <ProjectsView refreshKey={refreshKey} refresh={refresh} />}
-        {view === 'timeline' && <TimelineView refreshKey={refreshKey} refresh={refresh} />}
-        {view === 'knowledge' && <KnowledgeView refreshKey={refreshKey} initialTab={knowledgeTab} />}
+        {view === 'knowledge' && <KnowledgeView refreshKey={refreshKey} />}
         {view === 'life' && <LifeView refreshKey={refreshKey} refresh={refresh} />}
       </main>
     </div>

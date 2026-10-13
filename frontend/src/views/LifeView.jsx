@@ -6,8 +6,15 @@ const TRIGGER_TYPES = [
   { key: 'daily', label: '每天' },
   { key: 'weekly', label: '每周' },
   { key: 'interval', label: '间隔' },
+  { key: 'relative', label: '相对任务' },
 ]
 const WEEKDAYS = ['周一', '周二', '周三', '周四', '周五', '周六', '周日']
+// 相对提醒（2026-10-10）：挂在任务日期字段上，改期自动跟随
+const REL_FIELDS = [
+  { key: 'due_at', label: '截止' },
+  { key: 'start_at', label: '开始' },
+  { key: 'end_at', label: '结束' },
+]
 
 export default function LifeView({ refreshKey, refresh }) {
   const [reminders, setReminders] = useState([])
@@ -18,12 +25,31 @@ export default function LifeView({ refreshKey, refresh }) {
   const [time, setTime] = useState('09:00')
   const [weekday, setWeekday] = useState(0)
   const [hours, setHours] = useState('4')
+  // 相对提醒表单：任务 + 日期字段 + 偏移（N 天/小时 之前/之后）
+  const [relTasks, setRelTasks] = useState([])
+  const [relTaskId, setRelTaskId] = useState('')
+  const [relField, setRelField] = useState('due_at')
+  const [relAmount, setRelAmount] = useState('1')
+  const [relUnit, setRelUnit] = useState('day')
+  const [relDir, setRelDir] = useState('before')
   const [error, setError] = useState('')
 
   const load = async () => setReminders(await api.listReminders())
   useEffect(() => {
     load().catch(console.error)
   }, [refreshKey])
+
+  // 选中「相对任务」时拉取未完成任务作挂靠下拉
+  useEffect(() => {
+    if (type !== 'relative') return
+    api.listTasks()
+      .then((ts) => {
+        const open = ts.filter((t) => t.status !== 'done' && t.status !== 'cancelled')
+        setRelTasks(open)
+        if (!relTaskId && open.length) setRelTaskId(String(open[0].id))
+      })
+      .catch(console.error)
+  }, [type])
 
   // 按类型拼装触发值（后端会再校验归一化）
   const buildValue = () => {
@@ -42,6 +68,14 @@ export default function LifeView({ refreshKey, refresh }) {
       return `每${WEEKDAYS[Number(w)] || '?'} ${t || ''}`
     }
     if (r.trigger_type === 'interval') return `每 ${v} 小时`
+    if (r.trigger_type === 'relative') {
+      // 相对提醒：「《宏观经济学复习》截止前 1 天」
+      const off = Number(r.offset_minutes || 0)
+      const a = Math.abs(off)
+      const span = a % 1440 === 0 ? `${a / 1440} 天` : a % 60 === 0 ? `${a / 60} 小时` : `${a} 分钟`
+      const fname = REL_FIELDS.find((f) => f.key === r.relative_to)?.label || r.relative_to
+      return `《${r.task_title || '?'}》${fname}${off <= 0 ? '前' : '后'} ${span}`
+    }
     return v
   }
 
@@ -51,7 +85,21 @@ export default function LifeView({ refreshKey, refresh }) {
     if (!t) return
     setError('')
     try {
-      await api.createReminder({ title: t, trigger_type: type, trigger_value: buildValue() })
+      if (type === 'relative') {
+        // 相对提醒：偏移分钟（之前=负数），task_id/relative_to 由后端校验日期非空
+        const n = Number(relAmount)
+        if (!relTaskId || !n || n <= 0) {
+          setError('相对提醒需要选任务，且偏移量大于 0')
+          return
+        }
+        const offset = Math.round(n * (relUnit === 'day' ? 1440 : 60)) * (relDir === 'before' ? -1 : 1)
+        await api.createReminder({
+          title: t, trigger_type: 'relative', task_id: Number(relTaskId),
+          relative_to: relField, offset_minutes: offset,
+        })
+      } else {
+        await api.createReminder({ title: t, trigger_type: type, trigger_value: buildValue() })
+      }
       setTitle('')
       await load()
       refresh?.()
@@ -97,6 +145,34 @@ export default function LifeView({ refreshKey, refresh }) {
             onChange={(e) => setHours(e.target.value)} title="每隔几小时提醒一次"
             style={{ width: 90 }}
           />
+        )}
+        {type === 'relative' && (
+          <>
+            <select value={relTaskId} onChange={(e) => setRelTaskId(e.target.value)} title="挂靠的任务">
+              {relTasks.length === 0 && <option value="">（没有可挂的任务）</option>}
+              {relTasks.map((t) => (
+                <option key={t.id} value={t.id}>{t.title}</option>
+              ))}
+            </select>
+            <select value={relField} onChange={(e) => setRelField(e.target.value)} title="相对哪个日期">
+              {REL_FIELDS.map((f) => (
+                <option key={f.key} value={f.key}>{f.label}</option>
+              ))}
+            </select>
+            <select value={relDir} onChange={(e) => setRelDir(e.target.value)}>
+              <option value="before">之前</option>
+              <option value="after">之后</option>
+            </select>
+            <input
+              type="number" min="0.5" step="0.5" value={relAmount}
+              onChange={(e) => setRelAmount(e.target.value)}
+              style={{ width: 70 }}
+            />
+            <select value={relUnit} onChange={(e) => setRelUnit(e.target.value)}>
+              <option value="day">天</option>
+              <option value="hour">小时</option>
+            </select>
+          </>
         )}
         <button type="submit">添加</button>
       </form>

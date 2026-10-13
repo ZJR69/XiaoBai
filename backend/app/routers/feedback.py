@@ -1,7 +1,7 @@
 """M4 FR-4.4 反馈对话 + FR-4.5 温和收束自校准。
 
-晚间复盘流程（对话重，不弹表单）：
-1. 20 点后当天首次打开 → should-start 返回 pending → 前端自动发起
+晚间复盘流程（对话重，不弹表单；2026-09-24 阶段四起改召唤式——不再 20 点自动弹）：
+1. 用户在对话页点「复盘」按钮发起（should-start 仅用于恢复进行中状态）
 2. start：小白在对话流发开场白（注入今日完成情况），建 feedback_session
 3. 用户自然语言聊（就在普通对话流里）
 4. 结束复盘：extract → LLM 提取信号（实际完成/负荷感受/修正意见）入库
@@ -18,7 +18,6 @@ from app.database import get_conn
 
 router = APIRouter(prefix="/api/feedback", tags=["feedback"])
 
-FEEDBACK_HOUR = 20  # 20 点后发起
 DEFAULT_PARALLEL_THRESHOLD = 8
 THRESHOLD_MIN, THRESHOLD_MAX = 3, 15
 
@@ -56,16 +55,14 @@ def _today() -> str:
 
 @router.get("/should-start")
 def should_start():
-    """晚间复盘状态：pending（该开始了）/ in_progress / done / not_yet（还没到点）。
-    先查当日 session（进行中的复盘跨天也不丢按钮），再判时段。"""
+    """晚间复盘状态：pending（可发起）/ in_progress / done。
+    召唤式（阶段四）：不限时段，想复盘点一下；进行中的复盘跨天也不丢按钮。"""
     with get_conn() as conn:
         row = conn.execute(
             "SELECT id, signals FROM feedback_sessions WHERE date = ?", (_today(),)
         ).fetchone()
     if row:
         return {"status": "done" if row["signals"] else "in_progress", "session_id": row["id"]}
-    if datetime.now().hour < FEEDBACK_HOUR:
-        return {"status": "not_yet"}
     return {"status": "pending"}
 
 

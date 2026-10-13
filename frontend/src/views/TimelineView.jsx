@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { api } from '../api.js'
 
 function localToday() {
@@ -10,31 +10,6 @@ function localToday() {
 // Date 对象 → 本地日期串（同上理由）
 const localDateStr = (d) =>
   `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
-
-function groupByDate(tasks) {
-  const today = localToday()
-  const weekEnd = new Date(Date.now() + 7 * 86400000)
-  const weekEndStr = `${weekEnd.getFullYear()}-${String(weekEnd.getMonth() + 1).padStart(2, '0')}-${String(weekEnd.getDate()).padStart(2, '0')}`
-  const groups = { overdue: [], today: [], week: [], later: [], none: [] }
-  for (const t of tasks) {
-    if (t.status === 'done' || t.status === 'cancelled') continue
-    const due = (t.due_at || '').slice(0, 10) // 带时间的截止也按日期分组
-    if (!due) groups.none.push(t)
-    else if (due < today) groups.overdue.push(t)
-    else if (due === today) groups.today.push(t)
-    else if (due <= weekEndStr) groups.week.push(t)
-    else groups.later.push(t)
-  }
-  return groups
-}
-
-const SECTION_STYLE = {
-  overdue: { label: '逾期', cls: 'sec-overdue' },
-  today: { label: '今天', cls: 'sec-today' },
-  week: { label: '本周', cls: 'sec-week' },
-  later: { label: '更远', cls: 'sec-later' },
-  none: { label: '无日期', cls: 'sec-none' },
-}
 
 // ── 日程表：Notion 风格周历（7 天 × 6:00-23:00，日程块按类型染色） ──
 
@@ -61,9 +36,11 @@ const EMPTY_FORM = {
   date: '',                // kind=event 用（YYYY-MM-DD，打开表单时按点击列预填）
   day_of_week: 0, week_pattern: 'all', // kind=slot 用
   start_time: '08:00', end_time: '09:00', location: '',
+  rrule: '',               // 重复系列（阶段三 RRULE；表单只读展示，不在此编辑规律）
 }
 
-function ScheduleSection({ refreshKey, refresh }) {
+export function ScheduleSection({ refreshKey, refresh }) {
+  const scrollRef = useRef(null)              // 工作台内滚动容器（自动滚到当前时段）
   const [week, setWeek] = useState(null)      // {start, days:[{date, day_of_week, slots}]}
   const [offset, setOffset] = useState(0)     // 相对本周偏移（周数）
   const [form, setForm] = useState(EMPTY_FORM)
@@ -81,6 +58,13 @@ function ScheduleSection({ refreshKey, refresh }) {
   useEffect(() => {
     load().catch(console.error)
   }, [refreshKey, offset])
+
+  // 工作台内日程区独立滚动：看本周时自动滚到当前时段前一小时
+  useEffect(() => {
+    if (offset === 0 && week && scrollRef.current) {
+      scrollRef.current.scrollTop = Math.max(0, (new Date().getHours() - DAY_START - 1) * HOUR_H)
+    }
+  }, [week])
 
   const closeModal = () => { setEditing(null); setForm(EMPTY_FORM); setError('') }
 
@@ -113,7 +97,7 @@ function ScheduleSection({ refreshKey, refresh }) {
 
   const remove = async () => {
     if (!editing) return
-    if (!window.confirm('删除这条日程？')) return
+    if (!window.confirm(form.rrule ? '这是重复系列——删除后所有未来日期都会移除。删整个系列？' : '删除这条日程？')) return
     if (editing.kind === 'event') await api.deleteEvent(editing.id)
     else await api.deleteSlot(editing.id)
     closeModal()
@@ -132,6 +116,7 @@ function ScheduleSection({ refreshKey, refresh }) {
       day_of_week: s.day_of_week ?? 0, week_pattern: s.week_pattern || 'all',
       start_time: s.start_time, end_time: s.end_time,
       location: s.location || '',
+      rrule: s.rrule || '',
     })
   }
 
@@ -166,6 +151,7 @@ function ScheduleSection({ refreshKey, refresh }) {
       </div>
 
       {week && (
+        <div className="week-cal-scroll" ref={scrollRef}>
         <div className="week-cal">
           <div className="week-gutter">
             {Array.from({ length: DAY_END - DAY_START }, (_, i) => (
@@ -177,8 +163,8 @@ function ScheduleSection({ refreshKey, refresh }) {
           {week.days.map((day) => (
             <div key={day.date} className={`week-day ${day.date === todayStr ? 'is-today' : ''}`}>
               <div className="day-head">
-                周{WEEKDAYS[day.day_of_week]}
-                <span className="day-date">{day.date.slice(5).replace('-', '.')}</span>
+                <span className="dow">{['MON','TUE','WED','THU','FRI','SAT','SUN'][day.day_of_week]}</span>
+                <span className="day-date">{day.date.slice(8)}</span>
               </div>
               <div className="day-body" style={{ height: DAY_H }} onClick={(e) => onEmptyClick(e, day)}>
                 {day.slots.map((s) => {
@@ -189,7 +175,7 @@ function ScheduleSection({ refreshKey, refresh }) {
                   const height = ((eMin - sMin) / 60) * HOUR_H - 2
                   const hover = `${s.title}\n${s.start_time}–${s.end_time}` +
                     `${s.location ? ` @${s.location}` : ''}\n${entryLabel(s.entry_type)}` +
-                    `${s.source === 'event' ? '·一次性' : s.week_pattern !== 'all' ? (s.week_pattern === 'odd' ? '·单周' : '·双周') : ''}`
+                    `${s.source === 'event' ? (s.recurring ? '·重复系列' : '·一次性') : s.week_pattern !== 'all' ? (s.week_pattern === 'odd' ? '·单周' : '·双周') : ''}`
                   return (
                     <div
                       key={`${s.source || 'slot'}-${s.id}`}
@@ -199,13 +185,14 @@ function ScheduleSection({ refreshKey, refresh }) {
                       onClick={(e) => { e.stopPropagation(); startEdit(s, day.date) }}
                     >
                       <div className="slot-time">{s.start_time}</div>
-                      <div className="slot-title">{s.title}</div>
+                      <div className="slot-title">{s.recurring ? '↻ ' : ''}{s.title}</div>
                     </div>
                   )
                 })}
               </div>
             </div>
           ))}
+        </div>
         </div>
       )}
 
@@ -235,6 +222,9 @@ function ScheduleSection({ refreshKey, refresh }) {
                   {ENTRY_TYPES.map((t) => <option key={t.key} value={t.key}>{t.label}</option>)}
                 </select>
               </div>
+              {form.rrule && (
+                <p className="hint">重复系列：{form.rrule}（改动作用于整个系列，日期=系列首日；要改重复规律，在对话里让小白删了重建）</p>
+              )}
               <div className="form-row">
                 {form.kind === 'event' ? (
                   <input type="date" value={form.date} onChange={(e) => setForm((f) => ({ ...f, date: e.target.value }))} />
@@ -275,150 +265,4 @@ function ScheduleSection({ refreshKey, refresh }) {
   )
 }
 
-// ── 任务行（勾完成 / 编辑 / 删除）──
-
-function TaskRow({ t, onToggle, onEdit, onDelete, projectOptions }) {
-  const [editing, setEditing] = useState(false)
-  const [title, setTitle] = useState(t.title)
-  const [due, setDue] = useState((t.due_at || '').slice(0, 10))
-  const [priority, setPriority] = useState(t.priority)
-  const [projectId, setProjectId] = useState(t.project_id ?? '')
-
-  const save = async () => {
-    await onEdit(t.id, {
-      title: title.trim() || t.title, due_at: due || null, priority,
-      project_id: projectId === '' ? null : Number(projectId),
-    })
-    setEditing(false)
-  }
-
-  if (editing) {
-    return (
-      <div className="task editing-row">
-        <input className="edit-title" value={title} onChange={(e) => setTitle(e.target.value)} />
-        <input type="date" value={due} onChange={(e) => setDue(e.target.value)} />
-        <select value={priority} onChange={(e) => setPriority(Number(e.target.value))} title="优先级 1 高 - 5 低">
-          {[1, 2, 3, 4, 5].map((p) => <option key={p} value={p}>P{p}</option>)}
-        </select>
-        <select value={projectId} onChange={(e) => setProjectId(e.target.value === '' ? '' : Number(e.target.value))} title="挂靠的事">
-          <option value="">不挂靠</option>
-          {projectOptions.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
-        </select>
-        <button className="small-btn primary" onClick={save}>存</button>
-        <button className="small-btn" onClick={() => setEditing(false)}>取消</button>
-      </div>
-    )
-  }
-
-  return (
-    <div className="task">
-      <label className="task-row">
-        <input type="checkbox" checked={false} onChange={() => onToggle(t)} />
-        <span className="task-title">{t.title}</span>
-        <span className="task-pri">P{t.priority}</span>
-        <span className="task-due">{t.due_at?.slice(5, 10)}</span>
-      </label>
-      <span className="task-ops">
-        <button className="icon-btn" onClick={() => setEditing(true)} title="编辑">✎</button>
-        <button className="task-del" onClick={() => onDelete(t.id)} title="删除">×</button>
-      </span>
-    </div>
-  )
-}
-
-export default function TimelineView({ refreshKey, refresh }) {
-  const [tasks, setTasks] = useState([])
-  const [projects, setProjects] = useState([]) // 进行中的事（挂靠下拉用）
-  const [title, setTitle] = useState('')
-  const [due, setDue] = useState('')
-  const [projectId, setProjectId] = useState('')
-
-  const load = async () => {
-    const [ts, ps] = await Promise.all([api.listTasks(), api.listProjects()])
-    setTasks(ts)
-    setProjects(ps.filter((p) => p.status !== 'closed'))
-  }
-  useEffect(() => {
-    load().catch(console.error)
-  }, [refreshKey])
-
-  const groups = groupByDate(tasks)
-
-  const add = async (e) => {
-    e.preventDefault()
-    const t = title.trim()
-    if (!t) return
-    await api.createTask({
-      title: t, due_at: due || null,
-      project_id: projectId === '' ? null : Number(projectId),
-    })
-    setTitle('')
-    setDue('')
-    setProjectId('')
-    await load()
-    refresh?.()
-  }
-
-  const toggle = async (t) => {
-    await api.updateTask(t.id, { status: t.status === 'done' ? 'backlog' : 'done' })
-    await load()
-    refresh?.()
-  }
-
-  const edit = async (id, patch) => {
-    await api.updateTask(id, patch)
-    await load()
-    refresh?.()
-  }
-
-  const remove = async (id) => {
-    if (!window.confirm('删除这个任务？（挂靠的进展日志会保留）')) return
-    await api.deleteTask(id)
-    await load()
-    refresh?.()
-  }
-
-  return (
-    <div className="view">
-      <ScheduleSection refreshKey={refreshKey} refresh={refresh} />
-
-      <h2 className="mt">任务时间轴</h2>
-      <form className="inline-form" onSubmit={add}>
-        <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="新任务…" />
-        <input type="date" value={due} onChange={(e) => setDue(e.target.value)} />
-        <select value={projectId} onChange={(e) => setProjectId(e.target.value === '' ? '' : Number(e.target.value))} title="挂靠的事">
-          <option value="">不挂靠</option>
-          {projects.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
-        </select>
-        <button type="submit">添加</button>
-      </form>
-
-      {Object.entries(groups).map(([key, list]) =>
-        list.length > 0 ? (
-          <div key={key} className={`timeline-section ${SECTION_STYLE[key].cls}`}>
-            <div className="section-head">
-              {SECTION_STYLE[key].label}
-              <span className="section-count">{list.length}</span>
-            </div>
-            {list.map((t) => (
-              <TaskRow key={t.id} t={t} onToggle={toggle} onEdit={edit} onDelete={remove} projectOptions={projects} />
-            ))}
-          </div>
-        ) : null,
-      )}
-
-      <h2 className="mt">已完成</h2>
-      {tasks.filter((t) => t.status === 'done').map((t) => (
-        <div key={t.id} className="task done">
-          <label className="task-row">
-            <input type="checkbox" checked onChange={() => toggle(t)} />
-            <span className="task-title">{t.title}</span>
-          </label>
-        </div>
-      ))}
-      {tasks.filter((t) => t.status === 'done').length === 0 && (
-        <p className="empty">还没有完成的任务。</p>
-      )}
-    </div>
-  )
-}
+// 注：今日待办条已随工作台三合一移除（任务池与时间轴同屏，投影不再必要）；本文件仅导出 ScheduleSection 供工作台使用

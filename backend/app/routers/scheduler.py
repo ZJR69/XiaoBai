@@ -18,7 +18,6 @@ router = APIRouter(prefix="/api/notifications", tags=["notifications"])
 
 _started = False
 DUE_AHEAD_HOURS = 6  # 截止前 6 小时开始提醒
-SCHEDULE_AHEAD_MIN = 15  # 日程开始前 15 分钟预告
 
 
 # ── 日程匹配（schedule.py 的 today 端点也复用） ──
@@ -57,10 +56,25 @@ def today_line() -> str:
             f"（教学第 {wk} 周：{monday:%m.%d}–{sunday:%m.%d}）")
 
 
+def _occurs_on(rrule_str: str, start_iso: str, d: date) -> bool:
+    """重复系列（dtstart=系列首日 00:00）在日期 d 是否有实例。
+    rrule 串坏了静默 False——建时（API/操作卡）已校验，这里是兜底；
+    dateutil 缺失时同样静默降级（系列不展开，其余功能不受影响）。"""
+    try:
+        from dateutil.rrule import rrulestr
+        rule = rrulestr(rrule_str.strip(), dtstart=datetime.fromisoformat(start_iso + "T00:00"))
+    except Exception:
+        return False
+    day0 = datetime.combine(d, datetime.min.time())
+    # 半开窗口 [day0, 次日0点)：右端点减 1 微秒——实例都在 00:00，闭区间会把次日 0 点的实例算进当天
+    day_end = day0 + timedelta(days=1) - timedelta(microseconds=1)
+    return bool(rule.between(day0, day_end, inc=True))
+
+
 def slots_for_date(d: date | None = None) -> list[dict]:
-    """某天的完整日程 = 周期性 slots（星期 + 单双周 + 有效范围）+ 当天一次性 events。
-    返回条目带 source：'slot'（周期）/ 'event'（一次性）——周历据此区分渲染；
-    其余消费端（今日/预告/简报/对话召回）无需关心来源，改此一处全部自动获益。"""
+    """某天的完整日程 = 周期性 slots（星期 + 单双周 + 有效范围）+ 当天一次性 events + RRULE 系列展开。
+    返回条目带 source：'slot'（周期课程）/ 'event'（一次性或重复实例，实例另带 recurring=True）——
+    周历据此区分渲染；其余消费端（今日/预告/简报/对话召回）无需关心来源，改此一处全部自动获益。"""
     d = d or datetime.now().date()
     dow = d.weekday()
     iso = d.isoformat()
@@ -69,8 +83,12 @@ def slots_for_date(d: date | None = None) -> list[dict]:
         rows = conn.execute(
             "SELECT * FROM schedule_slots WHERE day_of_week = ?", (dow,)
         ).fetchall()
+        # 一次性日程（rrule 为空）；重复系列不在这查——它们的 date 是首次日期，靠下方展开命中任意天
         events = conn.execute(
-            "SELECT * FROM schedule_events WHERE date = ?", (iso,)
+            "SELECT * FROM schedule_events WHERE date = ? AND (rrule IS NULL OR rrule = '')", (iso,)
+        ).fetchall()
+        series = conn.execute(
+            "SELECT * FROM schedule_events WHERE rrule IS NOT NULL AND rrule != ''"
         ).fetchall()
     out = []
     for r in rows:
@@ -86,6 +104,11 @@ def slots_for_date(d: date | None = None) -> list[dict]:
     for e in events:
         # 归一化出 slot 同形字段（day_of_week/week_pattern），消费端不用分辨结构
         out.append({**dict(e), "source": "event", "day_of_week": dow, "week_pattern": "all"})
+    # RRULE 重复系列展开（阶段三）：查询时展开不落库——底层永远只有 1 个 TEXT 字段，新花式日程不改表结构
+    for s in series:
+        if _occurs_on(s["rrule"], s["date"], d):
+            out.append({**dict(s), "source": "event", "recurring": True,
+                        "day_of_week": dow, "week_pattern": "all"})
     return sorted(out, key=lambda s: s["start_time"] or "")
 
 
@@ -154,8 +177,30 @@ def _check_reminders():
                         fired = True
                 else:
                     fired = True
+            elif r["trigger_type"] == "relative":
+                # 相对任务日期（2026-10-10）：触发时刻=任务[relative_to]+offset，每 tick 现算——
+                # 任务改期/重复任务重排后 fire_time 跟着前移，last_fired_at 单调比较自动重新武装
+                trow = conn.execute(
+                    "SELECT due_at, start_at, end_at FROM tasks WHERE id = ?", (r["task_id"],)
+                ).fetchone()
+                rel_field = r["relative_to"] if r["relative_to"] in ("due_at", "start_at", "end_at") else None
+                raw_base = trow[rel_field] if trow and rel_field else None
+                if raw_base:
+                    try:
+                        base = datetime.fromisoformat(raw_base[:10] + "T00:00" if len(raw_base) == 10 else raw_base)
+                    except ValueError:
+                        base = None
+                    if base:
+                        fire_at = base + timedelta(minutes=r["offset_minutes"] or 0)
+                        try:
+                            last_dt = datetime.fromisoformat(r["last_fired_at"]) if r["last_fired_at"] else None
+                        except ValueError:
+                            last_dt = None
+                        if fire_at <= now and (last_dt is None or last_dt < fire_at):
+                            fired = True
             if fired:
-                _notify("reminder", r["title"], f"（{r['trigger_type']} 提醒）")
+                label = "相对任务日期" if r["trigger_type"] == "relative" else r["trigger_type"]
+                _notify("reminder", r["title"], f"（{label} 提醒）")
                 now_iso = now.isoformat(timespec="seconds")
                 new_active = 0 if r["trigger_type"] == "once" else 1
                 conn.execute(
@@ -197,69 +242,9 @@ def _check_due_tasks():
             )
 
 
-def _check_schedule_upcoming():
-    """日程预告（M4 FR-4.3）：下一项开始前 15 分钟"""
-    now = datetime.now()
-    now_hm = now.strftime("%H:%M")
-    for s in slots_for_date(now.date()):
-        if s["start_time"] and s["start_time"] > now_hm:
-            # 分钟差计算
-            sh, sm = map(int, s["start_time"].split(":"))
-            nh, nm = now.hour, now.minute
-            diff = (sh * 60 + sm) - (nh * 60 + nm)
-            if 0 < diff <= SCHEDULE_AHEAD_MIN:
-                where = f"@{s['location']} " if s["location"] else ""
-                _notify(
-                    "schedule", f"即将开始：{s['title']}",
-                    f"{where}{s['start_time']}–{s['end_time']}",
-                )
-                break
-
-
-def _check_graveyard():
-    """坟场清理（M5 FR-5.2）：投放区文件超 14 天未消化，建议处理或放弃。
-    只查投放区文件——闪记池不催（交互定案 IDS 2.5：小白永不主动催闪记）。
-    当日去重由 _notify 兜底，每 tick 检查成本可忽略。"""
-    cutoff = (datetime.now() - timedelta(days=14)).isoformat(timespec="seconds")
-    with get_conn() as conn:
-        old_files = conn.execute(
-            "SELECT COUNT(*) AS n FROM raw_files WHERE status = 'untracked' AND first_seen_at < ?",
-            (cutoff,),
-        ).fetchone()["n"]
-    if old_files >= 3:
-        _notify("graveyard", "投放区有文件躺了两周以上",
-                f"{old_files} 个文件超过 14 天未消化。消化它们，或移出投放区。")
-
-
-def _check_weekly_lint():
-    """每周一体检（PRD 4.5 每日节律）：wiki 有问题时发一条通知，每周至多一次。
-    只通知不修复——修复需用户在知识库视图确认（半自动契约）。"""
-    now = datetime.now()
-    if now.weekday() != 0 or now.hour < 8:
-        return
-    week_id = f"{now.isocalendar()[0]}-W{now.isocalendar()[1]}"
-    with get_conn() as conn:
-        row = conn.execute("SELECT value FROM settings WHERE key = 'last_lint_week'").fetchone()
-        if row and row["value"] == week_id:
-            return
-        conn.execute(
-            """INSERT INTO settings (key, value) VALUES ('last_lint_week', ?)
-               ON CONFLICT(key) DO UPDATE SET value = excluded.value""",
-            (week_id,),
-        )
-    from app.routers.wiki import collect_lint
-    try:
-        result = collect_lint()
-    except Exception:
-        return
-    if not result["ok"]:
-        _notify("lint", "知识库体检发现问题",
-                f"{len(result['issues'])} 个问题（孤儿页/core 膨胀/重复实体等），去知识库视图点「体检」看详情。")
-
-
 def _tick():
-    for check in (_check_reminders, _check_due_tasks, _check_schedule_upcoming, _check_graveyard,
-                  _check_weekly_lint):
+    # 阶段四摘除：日程预告（早报已有今日日程）、坟场通知、每周 lint（均随 wiki/投放区下线）
+    for check in (_check_reminders, _check_due_tasks):
         try:
             check()
         except Exception:

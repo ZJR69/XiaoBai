@@ -9,7 +9,31 @@ from app.database import get_conn
 
 router = APIRouter(prefix="/api/reminders", tags=["reminders"])
 
-TRIGGER_TYPES = ("once", "daily", "weekly", "interval")
+TRIGGER_TYPES = ("once", "daily", "weekly", "interval", "relative")
+
+RELATIVE_FIELDS = ("due_at", "start_at", "end_at")
+FIELD_NAMES = {"due_at": "截止", "start_at": "开始", "end_at": "结束"}
+
+
+def validate_relative(conn, task_id, relative_to, offset_minutes) -> int:
+    """相对提醒校验（Vikunja 对齐：必须挂任务、任务对应日期字段非空，否则 400 如实拒绝）。
+    返回归一化后的 offset_minutes（负数=之前）。"""
+    if not task_id:
+        raise HTTPException(400, "相对提醒需要挂任务（task_id）")
+    if relative_to not in RELATIVE_FIELDS:
+        raise HTTPException(400, f"relative_to 必须是 {RELATIVE_FIELDS} 之一")
+    try:
+        offset = int(offset_minutes)
+    except (TypeError, ValueError):
+        raise HTTPException(400, "offset_minutes 应为整数分钟（负数=之前，如 -1440=提前 1 天）")
+    task = conn.execute(
+        "SELECT due_at, start_at, end_at FROM tasks WHERE id = ?", (task_id,)
+    ).fetchone()
+    if not task:
+        raise HTTPException(400, "挂靠的任务不存在")
+    if not task[relative_to]:
+        raise HTTPException(400, f"该任务没有{FIELD_NAMES[relative_to]}日期，相对提醒无法触发，先给任务设日期")
+    return offset
 
 
 def _normalize_trigger(trigger_type: str, trigger_value: str | None) -> str:
@@ -60,19 +84,35 @@ def _normalize_trigger(trigger_type: str, trigger_value: str | None) -> str:
 
 class ReminderIn(BaseModel):
     title: str
-    trigger_type: str = "once"  # once/daily/weekly/interval
+    trigger_type: str = "once"  # once/daily/weekly/interval/relative
     trigger_value: str | None = None
+    task_id: int | None = None        # relative 必填：挂靠任务
+    relative_to: str | None = None    # relative 必填：due_at/start_at/end_at
+    offset_minutes: int | None = None  # relative 必填：分钟偏移（负数=之前）
 
 
 @router.get("")
 def list_reminders():
     with get_conn() as conn:
-        rows = conn.execute("SELECT * FROM reminders ORDER BY active DESC, id DESC").fetchall()
+        rows = conn.execute(
+            """SELECT r.*, t.title AS task_title FROM reminders r
+               LEFT JOIN tasks t ON r.task_id = t.id
+               ORDER BY r.active DESC, r.id DESC"""
+        ).fetchall()
     return [dict(r) for r in rows]
 
 
 @router.post("", status_code=201)
 def create_reminder(r: ReminderIn):
+    if r.trigger_type == "relative":
+        with get_conn() as conn:
+            offset = validate_relative(conn, r.task_id, r.relative_to, r.offset_minutes)
+            cur = conn.execute(
+                """INSERT INTO reminders (title, trigger_type, trigger_value, task_id, relative_to, offset_minutes)
+                   VALUES (?, 'relative', '', ?, ?, ?)""",
+                (r.title.strip(), r.task_id, r.relative_to, offset),
+            )
+            return {"id": cur.lastrowid, "title": r.title}
     trigger_value = _normalize_trigger(r.trigger_type, r.trigger_value)
     with get_conn() as conn:
         cur = conn.execute(

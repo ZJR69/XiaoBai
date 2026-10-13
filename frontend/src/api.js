@@ -46,18 +46,6 @@ export const api = {
     request(`/api/projects/${projectId}/logs/${logId}`, { method: 'DELETE' }),
   contextPack: (projectId) => request(`/api/projects/${projectId}/context-pack`),
 
-  // 知识库
-  listWikiPages: () => request('/api/wiki/pages'),
-  readWikiPage: (path) => request(`/api/wiki/page?path=${encodeURIComponent(path)}`),
-  archiveWikiPage: (path) =>
-    request('/api/wiki/archive', { method: 'POST', body: JSON.stringify({ path }) }),
-
-  // 投放区（原料）
-  scanDropzone: () => request('/api/raw/scan'),
-  digestFiles: (paths) =>
-    request('/api/raw/digest', { method: 'POST', body: JSON.stringify({ paths }) }),
-  rawEvents: (since) => request(`/api/raw/events?since=${since}`),
-
   // 生活角
   listReminders: () => request('/api/reminders'),
   createReminder: (r) =>
@@ -110,10 +98,8 @@ export const api = {
     }
     return final
   },
-  reviewConversation: (messages) =>
-    request('/api/review', { method: 'POST', body: JSON.stringify({ messages }) }),
-  applyProposals: (proposals, rejected = []) =>
-    request('/api/proposals/apply', { method: 'POST', body: JSON.stringify({ proposals, rejected }) }),
+
+  // 沉淀（review/proposals/apply）已退役 2026-09-26：进展自动入库（后端 _auto_memory），操作走确认卡
 
   // 对话驱动操作（确认卡：执行/撤销）+ 实体锚点
   executeAction: (action) =>
@@ -121,6 +107,15 @@ export const api = {
   undoAction: (undoId) =>
     request('/api/chat/undo', { method: 'POST', body: JSON.stringify({ undo_id: undoId }) }),
   listAnchors: () => request('/api/anchors'),
+
+  // 资源索引（重构蓝图阶段二：知识库新定位——链接/文件/资料地址登记与直达）
+  listLinks: () => request('/api/links'),
+  createLink: (l) => request('/api/links', { method: 'POST', body: JSON.stringify(l) }),
+  updateLink: (id, patch) => request(`/api/links/${id}`, { method: 'PUT', body: JSON.stringify(patch) }),
+  moveLink: (id, body) => request(`/api/links/${id}/move`, { method: 'POST', body: JSON.stringify(body) }),
+  deleteLink: (id) => request(`/api/links/${id}`, { method: 'DELETE' }),
+  openLink: (id) => request(`/api/links/${id}/open`, { method: 'POST' }),
+  pickLinkPath: (kind) => request('/api/links/pick', { method: 'POST', body: JSON.stringify({ kind }) }),
 
   // 日程表（M4）
   listSchedule: () => request('/api/schedule'),
@@ -160,13 +155,6 @@ export const api = {
   // 统一搜索（FR-2.5）
   search: (q) => request(`/api/search?q=${encodeURIComponent(q)}`),
 
-  // wiki 编辑 + 体检（FR-2.4 / M5）
-  saveWikiPage: (path, content) =>
-    request('/api/wiki/page', { method: 'PUT', body: JSON.stringify({ path, content }) }),
-  wikiLint: () => request('/api/wiki/lint'),
-  fixIndex: (paths) =>
-    request('/api/wiki/fix-index', { method: 'POST', body: JSON.stringify({ paths }) }),
-
   // 状态栏
   statusBar: async () => {
     const [tasks, inbox, reminders] = await Promise.all([
@@ -177,4 +165,10 @@ export const api = {
     const open = tasks.filter((t) => t.status !== 'done').length
     return { openTasks: open, inbox: inbox.length, reminders: reminders.filter((r) => r.active).length }
   },
+
+  // 保存筛选（对话裁决入库；页面只读+删除）
+  listFilters: () => request('/api/filters'),
+  createFilter: (f) =>
+    request('/api/filters', { method: 'POST', body: JSON.stringify(f) }),
+  deleteFilter: (id) => request(`/api/filters/${id}`, { method: 'DELETE' }),
 }

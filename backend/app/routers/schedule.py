@@ -136,17 +136,19 @@ def delete_slot(slot_id: int):
     return {"ok": True}
 
 
-# ── 一次性日程（schedule_events）：日程的默认形态——调课/牙医/临时会议 ──
-# 周期性课程与固定组会才用上面的 slots。查询不走这里的列表，统一走 slots_for_date 合并。
+# ── 一次性日程与重复系列（schedule_events）：一次性是默认形态——调课/牙医/临时会议；
+# 任意重复规律用 rrule 字段表达（iCalendar 原语，LLM 负责自然语言→RRULE 翻译，查询时展开不落库）。
+# 学期课表（单双周教学周）仍用上面的 slots。查询不走这里的列表，统一走 slots_for_date 合并展开。
 
 class EventIn(BaseModel):
     title: str
     entry_type: str = "personal"
-    date: str  # YYYY-MM-DD
+    date: str  # YYYY-MM-DD（重复系列=首次日期 dtstart）
     start_time: str = "09:00"
     end_time: str = "10:00"
     location: str | None = None
     note: str | None = None
+    rrule: str | None = None  # iCalendar RRULE，如 FREQ=WEEKLY;INTERVAL=2;BYDAY=TH
 
 
 class EventPatch(BaseModel):
@@ -157,9 +159,10 @@ class EventPatch(BaseModel):
     end_time: str | None = None
     location: str | None = None
     note: str | None = None
+    rrule: str | None = None
 
 
-def _validate_event(entry_type=None, date_s=None, start_time=None, end_time=None):
+def _validate_event(entry_type=None, date_s=None, start_time=None, end_time=None, rrule_s=None):
     if entry_type is not None and entry_type not in ENTRY_TYPES:
         raise HTTPException(400, f"entry_type 必须是 {ENTRY_TYPES} 之一")
     if date_s is not None:
@@ -170,6 +173,14 @@ def _validate_event(entry_type=None, date_s=None, start_time=None, end_time=None
     for t in (start_time, end_time):
         if t is not None and not (len(t) == 5 and ":" == t[2]):
             raise HTTPException(400, f"时间格式应为 HH:MM，收到 {t}")
+    if rrule_s:
+        try:
+            from dateutil.rrule import rrulestr
+            rrulestr(rrule_s.strip(), dtstart=datetime(2000, 1, 1))
+        except ImportError:
+            raise HTTPException(500, "缺少 python-dateutil，无法解析 rrule")
+        except (ValueError, TypeError):
+            raise HTTPException(400, f"rrule 无法解析（应为 iCalendar RRULE，如 FREQ=WEEKLY;BYDAY=TH），收到 {rrule_s}")
 
 
 @router.get("/events")
@@ -193,25 +204,26 @@ def list_events(start: str | None = None, end: str | None = None):
 
 @router.post("/events", status_code=201)
 def create_event(e: EventIn):
-    _validate_event(e.entry_type, e.date, e.start_time, e.end_time)
+    _validate_event(e.entry_type, e.date, e.start_time, e.end_time, e.rrule)
     now = datetime.now().isoformat(timespec="seconds")
     with get_conn() as conn:
         cur = conn.execute(
-            """INSERT INTO schedule_events (title, entry_type, date, start_time, end_time, location, note, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-            (e.title.strip(), e.entry_type, e.date, e.start_time, e.end_time, e.location, e.note, now),
+            """INSERT INTO schedule_events (title, entry_type, date, start_time, end_time, location, note, rrule, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (e.title.strip(), e.entry_type, e.date, e.start_time, e.end_time, e.location, e.note,
+             (e.rrule or "").strip() or None, now),
         )
         return {"id": cur.lastrowid, "title": e.title}
 
 
 @router.patch("/events/{event_id}")
 def update_event(event_id: int, patch: EventPatch):
-    _validate_event(patch.entry_type, patch.date, patch.start_time, patch.end_time)
+    _validate_event(patch.entry_type, patch.date, patch.start_time, patch.end_time, patch.rrule)
     with get_conn() as conn:
         if not conn.execute("SELECT 1 FROM schedule_events WHERE id = ?", (event_id,)).fetchone():
             raise HTTPException(404, "日程不存在")
         updates, params = [], []
-        for field in ("title", "entry_type", "date", "start_time", "end_time", "location", "note"):
+        for field in ("title", "entry_type", "date", "start_time", "end_time", "location", "note", "rrule"):
             val = getattr(patch, field)
             if val is not None:
                 updates.append(f"{field} = ?")

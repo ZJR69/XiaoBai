@@ -6,8 +6,8 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.database import init_db
 from app.routers import (
-    briefing, capture, chat, feedback, inbox, projects, raw, reminders,
-    schedule, scheduler, search, tasks, watch, wiki,
+    briefing, capture, chat, feedback, filters, inbox, links, projects, reminders,
+    schedule, scheduler, search, tasks,
 )
 
 
@@ -29,18 +29,17 @@ app.add_middleware(
 
 app.include_router(capture.router)
 app.include_router(inbox.router)
+app.include_router(links.router)
 app.include_router(tasks.router)
 app.include_router(projects.router)
-app.include_router(wiki.router)
 app.include_router(reminders.router)
 app.include_router(chat.router)
-app.include_router(raw.router)
-app.include_router(watch.router)
 app.include_router(schedule.router)
 app.include_router(scheduler.router)
 app.include_router(briefing.router)
 app.include_router(feedback.router)
 app.include_router(search.router)
+app.include_router(filters.router)
 
 
 @app.get("/api/health")
